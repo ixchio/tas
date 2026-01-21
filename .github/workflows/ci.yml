@@ -23,6 +23,11 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
       
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fuse libfuse-dev
+      
       - name: Install dependencies
         run: npm ci
       
