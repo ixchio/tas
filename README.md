@@ -1,158 +1,128 @@
-# 📦 TAS - Use Telegram as Your Cloud Storage
+# TAS — Telegram as Storage
 
-> **Free. Encrypted. Unlimited.** Stop paying for cloud storage.
+A CLI tool that uses your Telegram bot as encrypted file storage. Files are compressed, encrypted locally, then uploaded to your private bot chat.
 
 ```
-████████╗ █████╗ ███████╗
-╚══██╔══╝██╔══██╗██╔════╝
-   ██║   ███████║███████╗
-   ██║   ██╔══██║╚════██║
-   ██║   ██║  ██║███████║
-   ╚═╝   ╚═╝  ╚═╝╚══════╝
+┌─────────────┐     ┌───────────────┐     ┌──────────────┐
+│   CLI       │────▶│  Compress &   │────▶│  Telegram    │
+│   FUSE      │     │  Encrypt      │     │  Bot API     │
+└─────────────┘     └───────────────┘     └──────────────┘
+       │                    │                     │
+       ▼                    ▼                     ▼
+┌─────────────┐     ┌───────────────┐     ┌──────────────┐
+│ SQLite Index│     │ 49MB Chunks   │     │ Private Chat │
+└─────────────┘     └───────────────┘     └──────────────┘
 ```
 
-I got tired of paying $10/month for cloud storage. So I built this.
+## Why TAS?
 
-**TAS turns your Telegram bot into unlimited cloud storage.** Files are encrypted with AES-256 before upload — not even Telegram can read them.
+| Feature | TAS | Session-based tools (e.g. teldrive) |
+|---------|:---:|:-----------------------------------:|
+| Account ban risk | **None** (Bot API) | High (session hijack detection) |
+| Encryption | AES-256-GCM | Usually none |
+| Dependencies | SQLite only | Rclone, external DB |
+| Setup complexity | 2 minutes | Docker + multiple services |
 
-The killer feature? **Mount it as a folder.** Drag and drop files like it's Google Drive, but it's actually your private Telegram chat.
+**Key differences:**
+- Uses **Bot API**, not session-based auth — Telegram can't ban your account
+- **Encryption by default** — files encrypted before leaving your machine
+- **Local-first** — SQLite index, no cloud dependencies
+- **FUSE mount** — use Telegram like a folder
 
----
+## Security Model
 
-## ⚡ TL;DR
+| Component | Implementation |
+|-----------|----------------|
+| Cipher | AES-256-GCM |
+| Key derivation | PBKDF2-SHA512, 100,000 iterations |
+| Salt | 32 bytes, random per file |
+| IV | 12 bytes, random per file |
+| Auth tag | 16 bytes (integrity) |
+
+Your password never leaves your machine. Telegram stores encrypted blobs.
+
+## Limitations
+
+- **Not a backup** — Telegram can delete content without notice
+- **No versioning** — overwriting a file deletes the old version
+- **49MB chunks** — files split due to Bot API limits
+- **FUSE required** — mount feature needs `libfuse` on Linux/macOS
+- **Single user** — designed for personal use, not multi-tenant
+
+## Quick Start
 
 ```bash
+# Install
 npm install -g @nightowne/tas-cli
+
+# Setup (creates bot connection + encryption password)
 tas init
-tas mount ~/cloud
-# Now use ~/cloud like any folder. Files go to Telegram.
-```
 
----
-
-## 🤔 Why?
-
-| | TAS | Google Drive | Dropbox |
-|---|:---:|:---:|:---:|
-| **Price** | Free forever | $10/mo after 15GB | $12/mo after 2GB |
-| **Storage** | Unlimited | Limited | Limited |
-| **E2E Encrypted** | ✅ | ❌ | ❌ |
-| **Mounts as folder** | ✅ | ❌ | ❌ |
-| **Your data, your control** | ✅ | ❌ | ❌ |
-
----
-
-## 🚀 Quick Start
-
-### 1. Get a Telegram Bot (30 seconds)
-- Message [@BotFather](https://t.me/BotFather) on Telegram
-- Send `/newbot`, pick a name
-- Copy the token
-
-### 2. Install & Setup
-```bash
-npm install -g tas-cli
-tas init
-# Paste token, set password, message your bot
-```
-
-### 3. Use It
-```bash
-# Upload files
+# Upload a file
 tas push secret.pdf
 
-# Mount as a folder (the magic ✨)
+# Download a file
+tas pull secret.pdf
+
+# Mount as folder (requires libfuse)
 tas mount ~/cloud
-cp anything.zip ~/cloud/      # uploads to Telegram
-open ~/cloud/secret.pdf       # downloads from Telegram
 ```
 
----
+### Prerequisites
+- Node.js ≥18
+- Telegram account + bot token from [@BotFather](https://t.me/BotFather)
+- `libfuse` for mount feature:
+  ```bash
+  # Debian/Ubuntu
+  sudo apt install fuse libfuse-dev
+  
+  # Fedora
+  sudo dnf install fuse fuse-devel
+  
+  # macOS
+  brew install macfuse
+  ```
 
-## � The Folder Thing
-
-This is the part that makes TAS different. Run `tas mount ~/cloud` and you get a folder that:
-
-- **Looks normal** in your file manager
-- **Drag & drop** = upload to Telegram
-- **Open files** = download from Telegram
-- **Delete files** = removes from Telegram
-
-It's like Dropbox, except free and you own your data.
+## CLI Reference
 
 ```bash
-$ ls ~/cloud
-secret.pdf  photos.zip  notes.txt
+# Core
+tas init                    # Setup wizard
+tas push <file>             # Upload file
+tas pull <file|hash>        # Download file
+tas list [-l]               # List files (long format)
+tas delete <file|hash>      # Remove file
+tas status                  # Show stats
 
-$ cp newfile.doc ~/cloud/
-# Compresses → Encrypts → Uploads to Telegram
+# Search & Resume (v1.1.0)
+tas search <query>          # Search by filename
+tas search -t <query>       # Search by tag
+tas resume                  # Resume interrupted uploads
+
+# FUSE Mount
+tas mount <path>            # Mount as folder
+tas unmount <path>          # Unmount
+
+# Tags
+tas tag add <file> <tags...>    # Add tags
+tas tag remove <file> <tags...> # Remove tags
+tas tag list [tag]              # List tags or files by tag
+
+# Sync (Dropbox-style)
+tas sync add <folder>       # Register folder for sync
+tas sync start              # Start watching
+tas sync pull               # Download all to sync folders
+tas sync status             # Show sync status
+
+# Verification
+tas verify                  # Check file integrity
 ```
 
----
+## Auto-Start (systemd)
 
-## 🏷️ Organize with Tags
+See [systemd/README.md](systemd/README.md) for running sync as a service.
 
-```bash
-tas tag add report.pdf work finance
-tas tag list work           # shows all "work" files
-tas tag remove report.pdf finance
-```
-
----
-
-## 🔄 Auto-Sync Folders
-
-Dropbox-style sync. Any changes in the folder → auto-upload to Telegram.
-
-```bash
-tas sync add ~/Documents/work
-tas sync start
-# Now any file changes auto-sync to Telegram
-```
-
-Two-way sync:
-```bash
-tas sync pull    # Download everything from Telegram → local
-```
-
----
-
-## �️ Security
-
-- **AES-256-GCM** encryption
-- **PBKDF2** key derivation (100k iterations)
-- **Random IV** per file
-- Password never stored (only hash for verification)
-
-Your files are encrypted **before** they leave your computer. Telegram sees gibberish.
-
----
-
-## 📖 All Commands
-
-```bash
-tas init                 # Setup
-tas push <file>          # Upload
-tas pull <file>          # Download
-tas list                 # List files
-tas delete <file>        # Remove
-tas mount <folder>       # 🔥 Mount as folder
-tas unmount <folder>     # Unmount
-tas tag add/remove/list  # Tags
-tas sync add/start/pull  # Folder sync
-tas verify               # Check file integrity
-tas status               # Stats
-```
-
----
-
-## ⚙️ Auto-Start on Boot
-
-Want sync running 24/7? Check out [systemd/README.md](systemd/README.md) for the setup.
-
----
-
-## 🧪 Development
+## Development
 
 ```bash
 git clone https://github.com/ixchio/tas
@@ -161,14 +131,19 @@ npm install
 npm test  # 28 tests
 ```
 
----
+### Project Structure
+```
+src/
+├── cli.js           # Command definitions
+├── index.js         # Upload/download pipeline
+├── crypto/          # AES-256-GCM encryption
+├── db/              # SQLite file index
+├── fuse/            # FUSE filesystem mount
+├── sync/            # Folder sync engine
+├── telegram/        # Bot API client
+└── utils/           # Compression, chunking
+```
 
-## 📝 License
+## License
 
-MIT — do whatever you want.
-
----
-
-**Made because cloud storage shouldn't cost money.** ☁️
-
-If this saved you some subscription fees, star the repo ⭐
+MIT

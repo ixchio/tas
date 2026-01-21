@@ -179,16 +179,33 @@ program
 
             spinner.start('Processing file...');
 
+            // Import progress bar
+            const { ProgressBar } = await import('./utils/progress.js');
+            let progressBar = null;
+
             // Process and upload
             const result = await processFile(file, {
                 password,
                 dataDir: DATA_DIR,
                 customName: options.name,
                 config,
-                onProgress: (msg) => { spinner.text = msg; }
+                onProgress: (msg) => {
+                    if (!progressBar) spinner.text = msg;
+                },
+                onByteProgress: ({ uploaded, total }) => {
+                    if (!progressBar) {
+                        spinner.stop();
+                        progressBar = new ProgressBar({ label: 'Uploading', total });
+                    }
+                    progressBar.update(uploaded);
+                }
             });
 
-            spinner.succeed(`Uploaded: ${chalk.green(result.filename)}`);
+            if (progressBar) {
+                progressBar.complete(`Uploaded: ${result.filename}`);
+            } else {
+                spinner.succeed(`Uploaded: ${chalk.green(result.filename)}`);
+            }
             console.log(chalk.dim(`  Hash: ${result.hash}`));
             console.log(chalk.dim(`  Size: ${formatBytes(result.originalSize)} → ${formatBytes(result.storedSize)}`));
             console.log(chalk.dim(`  Chunks: ${result.chunks}`));
@@ -247,16 +264,33 @@ program
 
             spinner.start('Downloading...');
 
+            // Import progress bar
+            const { ProgressBar } = await import('./utils/progress.js');
+            let progressBar = null;
+
             const outputPath = options.output || fileRecord.filename;
             await retrieveFile(fileRecord, {
                 password,
                 dataDir: DATA_DIR,
                 outputPath,
                 config,
-                onProgress: (msg) => { spinner.text = msg; }
+                onProgress: (msg) => {
+                    if (!progressBar) spinner.text = msg;
+                },
+                onByteProgress: ({ downloaded, total }) => {
+                    if (!progressBar && total > 0) {
+                        spinner.stop();
+                        progressBar = new ProgressBar({ label: 'Downloading', total });
+                    }
+                    if (progressBar) progressBar.update(downloaded);
+                }
             });
 
-            spinner.succeed(`Downloaded: ${chalk.green(outputPath)}`);
+            if (progressBar) {
+                progressBar.complete(`Downloaded: ${outputPath}`);
+            } else {
+                spinner.succeed(`Downloaded: ${chalk.green(outputPath)}`);
+            }
 
         } catch (err) {
             spinner.fail(`Download failed: ${err.message}`);
@@ -1004,6 +1038,201 @@ function formatBytes(bytes) {
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
+
+// ============== SEARCH COMMAND ==============
+program
+    .command('search <query>')
+    .description('Search files by name or tag')
+    .option('-t, --tag', 'Search by tag instead of filename')
+    .action(async (query, options) => {
+        try {
+            const db = new FileIndex(path.join(DATA_DIR, 'index.db'));
+            db.init();
+
+            const results = options.tag
+                ? db.searchByTag(query)
+                : db.search(query);
+
+            if (results.length === 0) {
+                console.log(chalk.yellow(`\n📭 No files found matching "${query}"\n`));
+                db.close();
+                return;
+            }
+
+            console.log(chalk.cyan(`\n🔍 Search Results for "${query}" (${results.length})\n`));
+
+            for (const file of results) {
+                const tags = file.tags ? chalk.dim(` [${file.tags}]`) : '';
+                console.log(`  ${chalk.blue('●')} ${file.filename} ${chalk.dim(`(${formatBytes(file.original_size)})`)}${tags}`);
+            }
+
+            console.log();
+            db.close();
+        } catch (err) {
+            console.error(chalk.red('Search failed:'), err.message);
+            process.exit(1);
+        }
+    });
+
+// ============== RESUME COMMAND ==============
+program
+    .command('resume')
+    .description('Resume interrupted uploads')
+    .action(async () => {
+        try {
+            const db = new FileIndex(path.join(DATA_DIR, 'index.db'));
+            db.init();
+
+            const pending = db.getPendingUploads();
+
+            if (pending.length === 0) {
+                console.log(chalk.yellow('\n📭 No interrupted uploads found.\n'));
+                db.close();
+                return;
+            }
+
+            console.log(chalk.cyan(`\n🔄 Pending Uploads (${pending.length})\n`));
+
+            for (const upload of pending) {
+                const progress = Math.round((upload.uploaded_chunks / upload.total_chunks) * 100);
+                console.log(`  ${chalk.blue('●')} ${upload.filename}`);
+                console.log(chalk.dim(`    Progress: ${upload.uploaded_chunks}/${upload.total_chunks} chunks (${progress}%)`));
+                console.log(chalk.dim(`    Started: ${new Date(upload.created_at).toLocaleString()}`));
+            }
+
+            console.log();
+
+            // Ask if user wants to resume
+            const { action } = await inquirer.prompt([
+                {
+                    type: 'list',
+                    name: 'action',
+                    message: 'What would you like to do?',
+                    choices: [
+                        { name: 'Resume all pending uploads', value: 'resume' },
+                        { name: 'Clear all pending uploads', value: 'clear' },
+                        { name: 'Cancel', value: 'cancel' }
+                    ]
+                }
+            ]);
+
+            if (action === 'cancel') {
+                db.close();
+                return;
+            }
+
+            if (action === 'clear') {
+                for (const upload of pending) {
+                    // Clean up temp files
+                    const chunks = db.getPendingChunks(upload.id);
+                    for (const chunk of chunks) {
+                        try { fs.unlinkSync(chunk.chunk_path); } catch (e) { }
+                    }
+                    if (upload.temp_dir) {
+                        try { fs.rmdirSync(upload.temp_dir); } catch (e) { }
+                    }
+                    db.deletePendingUpload(upload.id);
+                }
+                console.log(chalk.green('✓ Cleared all pending uploads'));
+                db.close();
+                return;
+            }
+
+            // Resume uploads
+            const configPath = path.join(DATA_DIR, 'config.json');
+            if (!fs.existsSync(configPath)) {
+                console.log(chalk.red('✗ TAS not initialized.'));
+                db.close();
+                return;
+            }
+            const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+
+            // Get password
+            const { password } = await inquirer.prompt([
+                {
+                    type: 'password',
+                    name: 'password',
+                    message: 'Enter your encryption password:',
+                    mask: '*'
+                }
+            ]);
+
+            const encryptor = new Encryptor(password);
+            if (encryptor.getPasswordHash() !== config.passwordHash) {
+                console.log(chalk.red('✗ Incorrect password'));
+                db.close();
+                return;
+            }
+
+            // Connect to Telegram
+            const { TelegramClient } = await import('./telegram/client.js');
+            const client = new TelegramClient(DATA_DIR);
+            await client.initialize(config.botToken);
+            client.setChatId(config.chatId);
+
+            for (const upload of pending) {
+                console.log(chalk.cyan(`\n📤 Resuming: ${upload.filename}`));
+
+                const chunks = db.getPendingChunks(upload.id);
+                const pendingChunks = chunks.filter(c => !c.uploaded);
+
+                for (const chunk of pendingChunks) {
+                    if (!fs.existsSync(chunk.chunk_path)) {
+                        console.log(chalk.red(`  ✗ Chunk file missing: ${chunk.chunk_path}`));
+                        continue;
+                    }
+
+                    console.log(chalk.dim(`  ↑ Uploading chunk ${chunk.chunk_index + 1}/${upload.total_chunks}...`));
+
+                    const caption = upload.total_chunks > 1
+                        ? `📦 ${upload.filename} (${chunk.chunk_index + 1}/${upload.total_chunks})`
+                        : `📦 ${upload.filename}`;
+
+                    const result = await client.sendFile(chunk.chunk_path, caption);
+                    db.markChunkUploaded(upload.id, chunk.chunk_index, result.messageId.toString(), result.fileId);
+
+                    // Clean up temp file
+                    fs.unlinkSync(chunk.chunk_path);
+                }
+
+                // All chunks uploaded - finalize
+                const allChunks = db.getPendingChunks(upload.id);
+                if (allChunks.every(c => c.uploaded)) {
+                    // Add to main files table
+                    const fileId = db.addFile({
+                        filename: upload.filename,
+                        hash: upload.hash,
+                        originalSize: upload.original_size,
+                        storedSize: upload.original_size, // Approximate
+                        chunks: upload.total_chunks,
+                        compressed: true
+                    });
+
+                    // Add chunk records
+                    for (const chunk of allChunks) {
+                        db.addChunk(fileId, chunk.chunk_index, chunk.message_id, 0);
+                        db.db.prepare('UPDATE chunks SET file_telegram_id = ? WHERE file_id = ? AND chunk_index = ?')
+                            .run(chunk.file_telegram_id, fileId, chunk.chunk_index);
+                    }
+
+                    // Clean up pending record
+                    db.deletePendingUpload(upload.id);
+                    if (upload.temp_dir) {
+                        try { fs.rmdirSync(upload.temp_dir); } catch (e) { }
+                    }
+
+                    console.log(chalk.green(`  ✓ Completed: ${upload.filename}`));
+                }
+            }
+
+            console.log(chalk.green('\n✨ All uploads resumed!\n'));
+            db.close();
+
+        } catch (err) {
+            console.error(chalk.red('Resume failed:'), err.message);
+            process.exit(1);
+        }
+    });
 
 program.parse();
 

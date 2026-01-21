@@ -19,7 +19,7 @@ const TELEGRAM_CHUNK_SIZE = 49 * 1024 * 1024;
  * Process and upload a file to Telegram
  */
 export async function processFile(filePath, options) {
-    const { password, dataDir, customName, config, onProgress } = options;
+    const { password, dataDir, customName, config, onProgress, onByteProgress } = options;
 
     onProgress?.('Reading file...');
 
@@ -109,6 +109,9 @@ export async function processFile(filePath, options) {
         compressed
     });
 
+    let uploadedBytes = 0;
+    const totalBytes = chunkFiles.reduce((acc, c) => acc + c.size, 0);
+
     for (const chunk of chunkFiles) {
         onProgress?.(`Uploading chunk ${chunk.index + 1}/${chunkFiles.length}...`);
 
@@ -117,6 +120,9 @@ export async function processFile(filePath, options) {
             : `📦 ${filename}`;
 
         const result = await client.sendFile(chunk.path, caption);
+
+        uploadedBytes += chunk.size;
+        onByteProgress?.({ uploaded: uploadedBytes, total: totalBytes, chunk: chunk.index + 1, totalChunks: chunkFiles.length });
 
         // Store file_id instead of message_id for downloads
         db.addChunk(fileId, chunk.index, result.messageId.toString(), chunk.size);
@@ -152,7 +158,7 @@ export async function processFile(filePath, options) {
  * Retrieve a file from Telegram
  */
 export async function retrieveFile(fileRecord, options) {
-    const { password, dataDir, outputPath, config, onProgress } = options;
+    const { password, dataDir, outputPath, config, onProgress, onByteProgress } = options;
 
     onProgress?.('Connecting to Telegram...');
 
@@ -174,11 +180,15 @@ export async function retrieveFile(fileRecord, options) {
 
     // Download all chunks
     const downloadedChunks = [];
+    let downloadedBytes = 0;
+    const totalBytes = fileRecord.stored_size || chunks.reduce((acc, c) => acc + (c.size || 0), 0);
 
     for (const chunk of chunks) {
         onProgress?.(`Downloading chunk ${chunk.chunk_index + 1}/${chunks.length}...`);
 
         const data = await client.downloadFile(chunk.file_telegram_id);
+        downloadedBytes += data.length;
+        onByteProgress?.({ downloaded: downloadedBytes, total: totalBytes, chunk: chunk.chunk_index + 1, totalChunks: chunks.length });
 
         // Parse header
         const header = parseHeader(data);

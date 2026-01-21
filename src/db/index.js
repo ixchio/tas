@@ -91,6 +91,34 @@ export class FileIndex {
         UNIQUE(folder_id, relative_path)
       );
     `);
+
+    // Create pending_uploads table for resume functionality
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS pending_uploads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        filename TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        hash TEXT NOT NULL,
+        original_size INTEGER NOT NULL,
+        total_chunks INTEGER NOT NULL,
+        uploaded_chunks INTEGER NOT NULL DEFAULT 0,
+        temp_dir TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(hash)
+      );
+
+      CREATE TABLE IF NOT EXISTS pending_chunks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pending_id INTEGER NOT NULL,
+        chunk_index INTEGER NOT NULL,
+        chunk_path TEXT NOT NULL,
+        uploaded INTEGER NOT NULL DEFAULT 0,
+        message_id TEXT,
+        file_telegram_id TEXT,
+        FOREIGN KEY (pending_id) REFERENCES pending_uploads(id) ON DELETE CASCADE,
+        UNIQUE(pending_id, chunk_index)
+      );
+    `);
   }
 
   /**
@@ -343,6 +371,125 @@ export class FileIndex {
       DELETE FROM sync_state WHERE folder_id = ? AND relative_path = ?
     `);
     stmt.run(folderId, relativePath);
+  }
+
+  // ============== SEARCH METHODS ==============
+
+  /**
+   * Search files by filename (fuzzy match)
+   */
+  search(query) {
+    const stmt = this.db.prepare(`
+      SELECT f.*, GROUP_CONCAT(t.tag) as tags
+      FROM files f
+      LEFT JOIN tags t ON f.id = t.file_id
+      WHERE f.filename LIKE ?
+      GROUP BY f.id
+      ORDER BY f.created_at DESC
+    `);
+    return stmt.all(`%${query}%`);
+  }
+
+  /**
+   * Search files by tag
+   */
+  searchByTag(query) {
+    const stmt = this.db.prepare(`
+      SELECT f.*, GROUP_CONCAT(t.tag) as tags
+      FROM files f
+      INNER JOIN tags t ON f.id = t.file_id
+      WHERE t.tag LIKE ?
+      GROUP BY f.id
+      ORDER BY f.created_at DESC
+    `);
+    return stmt.all(`%${query}%`);
+  }
+
+  // ============== RESUME UPLOAD METHODS ==============
+
+  /**
+   * Add a pending upload
+   */
+  addPendingUpload(data) {
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO pending_uploads 
+      (filename, file_path, hash, original_size, total_chunks, uploaded_chunks, temp_dir)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    const result = stmt.run(
+      data.filename,
+      data.filePath,
+      data.hash,
+      data.originalSize,
+      data.totalChunks,
+      data.uploadedChunks || 0,
+      data.tempDir
+    );
+    return result.lastInsertRowid;
+  }
+
+  /**
+   * Add a pending chunk
+   */
+  addPendingChunk(pendingId, chunkIndex, chunkPath) {
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO pending_chunks (pending_id, chunk_index, chunk_path, uploaded)
+      VALUES (?, ?, ?, 0)
+    `);
+    stmt.run(pendingId, chunkIndex, chunkPath);
+  }
+
+  /**
+   * Mark chunk as uploaded
+   */
+  markChunkUploaded(pendingId, chunkIndex, messageId, fileTelegramId) {
+    const stmt = this.db.prepare(`
+      UPDATE pending_chunks 
+      SET uploaded = 1, message_id = ?, file_telegram_id = ?
+      WHERE pending_id = ? AND chunk_index = ?
+    `);
+    stmt.run(messageId, fileTelegramId, pendingId, chunkIndex);
+
+    // Update uploaded count
+    this.db.prepare(`
+      UPDATE pending_uploads SET uploaded_chunks = uploaded_chunks + 1 WHERE id = ?
+    `).run(pendingId);
+  }
+
+  /**
+   * Get all pending uploads
+   */
+  getPendingUploads() {
+    const stmt = this.db.prepare(`
+      SELECT * FROM pending_uploads ORDER BY created_at DESC
+    `);
+    return stmt.all();
+  }
+
+  /**
+   * Get pending chunks for an upload
+   */
+  getPendingChunks(pendingId) {
+    const stmt = this.db.prepare(`
+      SELECT * FROM pending_chunks WHERE pending_id = ? ORDER BY chunk_index
+    `);
+    return stmt.all(pendingId);
+  }
+
+  /**
+   * Delete a pending upload (and its chunks via CASCADE)
+   */
+  deletePendingUpload(pendingId) {
+    const stmt = this.db.prepare('DELETE FROM pending_uploads WHERE id = ?');
+    stmt.run(pendingId);
+  }
+
+  /**
+   * Get pending upload by hash
+   */
+  getPendingByHash(hash) {
+    const stmt = this.db.prepare('SELECT * FROM pending_uploads WHERE hash = ?');
+    return stmt.get(hash);
   }
 
   /**
