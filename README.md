@@ -1,5 +1,9 @@
 # TAS — Telegram as Storage
 
+[![CI](https://github.com/ixchio/tas/actions/workflows/ci.yml/badge.svg)](https://github.com/ixchio/tas/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@nightowne/tas-cli)](https://www.npmjs.com/package/@nightowne/tas-cli)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A CLI tool that uses your Telegram bot as encrypted file storage. Files are compressed, encrypted locally, then uploaded to your private bot chat.
 
 ```
