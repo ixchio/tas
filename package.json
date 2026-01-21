@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node src/cli.js",
     "init": "node src/cli.js init",
-    "test": "node --test tests/",
+    "test": "node --test tests/*.test.js",
     "prepublishOnly": "npm test"
   },
   "keywords": [
