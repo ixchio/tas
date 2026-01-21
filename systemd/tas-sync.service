@@ -1,0 +1,21 @@
+[Unit]
+Description=TAS - Telegram as Storage Sync Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node /home/USER/tas/src/cli.js sync start --password-file /home/USER/.tas-password
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/USER/tas/data /home/USER/TelegramCloud
+
+[Install]
+WantedBy=default.target

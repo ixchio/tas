@@ -1,0 +1,57 @@
+{
+  "name": "tas-cli",
+  "version": "1.0.0",
+  "description": "📦 Telegram as Storage - Free encrypted cloud storage via Telegram. Mount Telegram as a folder!",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "tas": "./src/cli.js"
+  },
+  "scripts": {
+    "start": "node src/cli.js",
+    "init": "node src/cli.js init",
+    "test": "node --test tests/",
+    "prepublishOnly": "npm test"
+  },
+  "keywords": [
+    "telegram",
+    "storage",
+    "cloud",
+    "encryption",
+    "backup",
+    "sync",
+    "fuse",
+    "mount",
+    "free-storage",
+    "file-manager",
+    "cli"
+  ],
+  "author": "ixchio",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ixchio/tas.git"
+  },
+  "homepage": "https://github.com/ixchio/tas#readme",
+  "bugs": {
+    "url": "https://github.com/ixchio/tas/issues"
+  },
+  "files": [
+    "src/",
+    "systemd/",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "node-telegram-bot-api": "^0.66.0",
+    "commander": "^12.1.0",
+    "better-sqlite3": "^11.6.0",
+    "fuse-native": "^2.2.6",
+    "ora": "^8.1.1",
+    "chalk": "^5.3.0",
+    "inquirer": "^12.2.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
