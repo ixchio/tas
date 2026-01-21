@@ -22,7 +22,7 @@ The killer feature? **Mount it as a folder.** Drag and drop files like it's Goog
 ## ⚡ TL;DR
 
 ```bash
-npm install -g tas-cli
+npm install -g @nightowne/tas-cli
 tas init
 tas mount ~/cloud
 # Now use ~/cloud like any folder. Files go to Telegram.
