@@ -4,6 +4,10 @@
 [![npm](https://img.shields.io/npm/v/@nightowne/tas-cli)](https://www.npmjs.com/package/@nightowne/tas-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+<p align="center">
+  <img src="assets/demo.gif" alt="TAS Demo" width="600">
+</p>
+
 A CLI tool that uses your Telegram bot as encrypted file storage. Files are compressed, encrypted locally, then uploaded to your private bot chat.
 
 ```

@@ -218,10 +218,10 @@ program
 
 // ============== PULL COMMAND ==============
 program
-    .command('pull <identifier>')
+    .command('pull <identifier> [output]')
     .description('Download a file from Telegram storage (by filename or hash)')
     .option('-o, --output <path>', 'Output path for the file')
-    .action(async (identifier, options) => {
+    .action(async (identifier, output, options) => {
         const spinner = ora('Looking up file...').start();
 
         try {
@@ -268,7 +268,7 @@ program
             const { ProgressBar } = await import('./utils/progress.js');
             let progressBar = null;
 
-            const outputPath = options.output || fileRecord.filename;
+            const outputPath = output || options.output || fileRecord.filename;
             await retrieveFile(fileRecord, {
                 password,
                 dataDir: DATA_DIR,
