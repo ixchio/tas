@@ -11,6 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     
     strategy:
+      fail-fast: false
       matrix:
         node-version: [18.x, 20.x, 22.x]
     
@@ -26,7 +27,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y fuse libfuse-dev
+          sudo apt-get install -y fuse libfuse-dev build-essential python3
       
       - name: Install dependencies
         run: npm ci
