@@ -1,0 +1,2 @@
+# Linguist overrides — keep language stats clean
+*.json linguist-detectable=false

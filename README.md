@@ -1,14 +1,25 @@
-# Telegram as Storage
-
-[![CI](https://github.com/ixchio/tas/actions/workflows/ci.yml/badge.svg)](https://github.com/ixchio/tas/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/@nightowne/tas-cli)](https://www.npmjs.com/package/@nightowne/tas-cli)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
 <p align="center">
-  <img src="assets/demo.gif" alt="Demo" width="600">
+  <img src="assets/demo.gif" alt="TAS Demo" width="600">
 </p>
 
-A CLI tool that uses your Telegram bot as encrypted file storage. Files are compressed, encrypted locally, then uploaded to your private bot chat.
+<h1 align="center">Telegram as Storage</h1>
+
+<p align="center">
+  <strong>Free, encrypted, unlimited cloud storage — inside Telegram.</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/ixchio/tas/actions/workflows/ci.yml"><img src="https://github.com/ixchio/tas/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://www.npmjs.com/package/@nightowne/tas-cli"><img src="https://img.shields.io/npm/v/@nightowne/tas-cli" alt="npm"></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+  <a href="https://www.npmjs.com/package/@nightowne/tas-cli"><img src="https://img.shields.io/npm/dm/@nightowne/tas-cli" alt="Downloads"></a>
+</p>
+
+---
+
+I built this because I wanted encrypted cloud storage that's actually free. Google Drive reads your files. Dropbox costs money. Telegram gives you unlimited storage with a bot API — so I wrote a CLI that turns it into a proper encrypted drive.
+
+**What this does:** Compresses, encrypts (AES-256-GCM), and uploads your files to your own private Telegram bot chat. Mount it as a folder, sync directories, or share files with expiring links.
 
 ```
 ┌─────────────┐     ┌───────────────┐     ┌──────────────┐
@@ -22,162 +33,130 @@ A CLI tool that uses your Telegram bot as encrypted file storage. Files are comp
 └─────────────┘     └───────────────┘     └──────────────┘
 ```
 
-## Why TAS?
+## ⚡ Quick Start
 
-| Feature | TAS | Session-based tools (e.g. teldrive) |
-|---------|:---:|:-----------------------------------:|
-| Account ban risk | None (Bot API) | High (session hijack detection) |
-| Encryption | AES-256-GCM | Usually none |
-| Dependencies | SQLite only | Rclone, external DB |
-| Setup complexity | 2 minutes | Docker + multiple services |
+```bash
+npm install -g @nightowne/tas-cli
+tas init          # 2-minute setup wizard
+tas push secret.pdf
+tas pull secret.pdf
+```
 
-Key differences:
-- Uses Bot API, not session-based auth - Telegram can't ban your account
-- Encryption by default - files encrypted before leaving your machine
-- Local-first - SQLite index, no cloud dependencies
-- FUSE mount - use Telegram like a folder
+## 🔥 Features
 
-## Security Model
+### Mount as a folder
+```bash
+tas mount ~/cloud      # FUSE mount — drag & drop files
+tas unmount ~/cloud
+```
+Requires `libfuse` (`apt install fuse libfuse-dev` on Debian/Ubuntu, `brew install macfuse` on macOS).
+
+### Auto-sync folders
+```bash
+tas sync add ~/Documents    # Register
+tas sync start              # Watch for changes, auto-upload
+tas sync pull               # Download everything back
+```
+
+### Share files with expiring links
+```bash
+tas share create secret.pdf --expire 1h --max-downloads 3
+# → http://localhost:3000/d/a1b2c3d4...
+
+tas share list              # Active shares
+tas share revoke a1b2c3d4   # Revoke
+```
+Spins up a local HTTP server. File is downloaded from Telegram, decrypted, and served. Dark-themed download page with file info.
+
+## 🛡️ Security
 
 | Component | Implementation |
 |-----------|----------------|
 | Cipher | AES-256-GCM |
-| Key derivation | PBKDF2-SHA512, 100,000 iterations |
+| Key derivation | PBKDF2-SHA512, 100k iterations |
 | Salt | 32 bytes, random per file |
 | IV | 12 bytes, random per file |
-| Auth tag | 16 bytes (integrity) |
+| Auth tag | 16 bytes (integrity verification) |
 
-Your password never leaves your machine. Telegram stores encrypted blobs.
+Your password **never** leaves your machine. Telegram only sees encrypted blobs. Even if someone accesses your bot chat, they get meaningless data without your password.
 
-## Limitations
-
-- Not a backup - Telegram can delete content without notice
-- No versioning - overwriting a file deletes the old version
-- 49MB chunks - files split due to Bot API limits
-- FUSE required - mount feature needs libfuse on Linux/macOS
-- Single user - designed for personal use, not multi-tenant
-
-## Quick Start
-
-```bash
-# Install
-npm install -g @nightowne/tas-cli
-
-# Setup (creates bot connection + encryption password)
-tas init
-
-# Upload a file
-tas push secret.pdf
-
-# Download a file
-tas pull secret.pdf
-
-# Mount as folder (requires libfuse)
-tas mount ~/cloud
-```
-
-### Prerequisites
-- Node.js ≥18
-- Telegram account + bot token from [@BotFather](https://t.me/BotFather)
-- `libfuse` for mount feature:
-  ```bash
-  # Debian/Ubuntu
-  sudo apt install fuse libfuse-dev
-  
-  # Fedora
-  sudo dnf install fuse fuse-devel
-  
-  # macOS
-  brew install macfuse
-  ```
-
-## CLI Reference
+## 📋 Full CLI Reference
 
 ```bash
 # Core
 tas init                    # Setup wizard
-tas push <file>             # Upload file
-tas pull <file|hash>        # Download file
-tas list [-l]               # List files (long format)
-tas delete <file|hash>      # Remove file
-tas status                  # Show stats
-
-# Search & Resume (v1.1.0)
-tas search <query>          # Search by filename
-tas search -t <query>       # Search by tag
+tas push <file>             # Upload
+tas pull <file|hash>        # Download
+tas list [-l]               # List files
+tas delete <file|hash>      # Delete
+tas status                  # Stats
+tas search <query>          # Search files
 tas resume                  # Resume interrupted uploads
+tas verify                  # Check integrity
 
 # FUSE Mount
 tas mount <path>            # Mount as folder
 tas unmount <path>          # Unmount
 
-# Tags
-tas tag add <file> <tags...>    # Add tags
-tas tag remove <file> <tags...> # Remove tags
-tas tag list [tag]              # List tags or files by tag
-
-# Sync (Dropbox-style)
-tas sync add <folder>       # Register folder for sync
+# Sync
+tas sync add <folder>       # Register folder
 tas sync start              # Start watching
-tas sync pull               # Download all to sync folders
-tas sync status             # Show sync status
+tas sync pull               # Download all
+tas sync status             # Show status
 
-# Share (temporary links)
+# Share
 tas share create <file>     # Create download link
-tas share create <file> --expire 1h --max-downloads 3
-tas share list              # Show active shares
-tas share revoke <token>    # Revoke a share
+tas share list              # Active shares
+tas share revoke <token>    # Revoke
 
-# Verification
-tas verify                  # Check file integrity
+# Tags
+tas tag add <file> <tags...>
+tas tag remove <file> <tags...>
+tas tag list [tag]
 ```
 
-## Automation
-
-Skip password prompts for scripts and CI/CD:
+## 🤖 Automation
 
 ```bash
-# Environment variable
+# Skip password prompts
 export TAS_PASSWORD="your-password"
 tas push file.pdf
-tas sync start
 
-# Or use CLI flag (recommended for CI/CD)
+# Or inline
 tas push -p "password" file.pdf
 ```
 
-Works great with:
-- Cron jobs for automated backups
-- GitHub Actions and GitLab CI
-- Docker containers
-- Shell scripts for batch operations
+Works with cron, GitHub Actions, Docker, or any CI/CD.
 
-## Auto-Start (systemd)
+## ⚠️ Limitations
 
-See [systemd/README.md](systemd/README.md) for running sync as a service.
+- **Not a backup** — Telegram can delete content without notice
+- **No versioning** — overwriting deletes the old version
+- **49MB chunks** — files split due to Bot API limits
+- **Single user** — personal use, not multi-tenant
+- **FUSE required** — mount feature needs libfuse
 
-## Development
+## 🛠️ Development
 
 ```bash
 git clone https://github.com/ixchio/tas
-cd tas
-npm install
-npm test  # 28 tests
+cd tas && npm install
+npm test  # 43 tests
 ```
 
-### Project Structure
 ```
 src/
-├── cli.js           # Command definitions
+├── cli.js           # Commands
 ├── index.js         # Upload/download pipeline
-├── crypto/          # AES-256-GCM encryption
-├── db/              # SQLite file index
-├── fuse/            # FUSE filesystem mount
+├── crypto/          # AES-256-GCM
+├── db/              # SQLite index
+├── fuse/            # FUSE filesystem
+├── share/           # HTTP share server
 ├── sync/            # Folder sync engine
 ├── telegram/        # Bot API client
 └── utils/           # Compression, chunking
 ```
 
-## License
+## 📄 License
 
-MIT
+MIT — do whatever you want with it.
