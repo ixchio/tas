@@ -1,7 +1,7 @@
 {
   "name": "@nightowne/tas-cli",
-  "version": "1.1.1",
-  "description": "📦 Telegram as Storage - Free encrypted cloud storage via Telegram. Mount Telegram as a folder!",
+  "version": "2.0.0",
+  "description": "Telegram as Storage - Automated encrypted cloud backup. Free, encrypted, scriptable. Mount as folder or use with cron/Docker.",
   "type": "module",
   "main": "src/index.js",
   "bin": {

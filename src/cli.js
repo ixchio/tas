@@ -15,6 +15,7 @@ import { Compressor } from './utils/compression.js';
 import { FileIndex } from './db/index.js';
 import { processFile, retrieveFile } from './index.js';
 import { printBanner, LOGO, TAGLINE, VERSION } from './utils/branding.js';
+import { getPassword, verifyPassword, loadConfig, requireConfig, getAndVerifyPassword } from './utils/cli-helpers.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -140,6 +141,7 @@ program
     .command('push <file>')
     .description('Upload a file to Telegram storage')
     .option('-n, --name <name>', 'Custom name for the file')
+    .option('-p, --password <password>', 'Encryption password (uses TAS_PASSWORD env var if not provided)')
     .action(async (file, options) => {
         const spinner = ora('Preparing...').start();
 
@@ -150,32 +152,11 @@ program
                 process.exit(1);
             }
 
-            // Load config
-            const configPath = path.join(DATA_DIR, 'config.json');
-            if (!fs.existsSync(configPath)) {
-                spinner.fail('TAS not initialized. Run `tas init` first.');
-                process.exit(1);
-            }
-            const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-
+            const config = requireConfig(DATA_DIR);
             spinner.stop();
 
-            // Get password
-            const { password } = await inquirer.prompt([
-                {
-                    type: 'password',
-                    name: 'password',
-                    message: 'Enter your encryption password:',
-                    mask: '*'
-                }
-            ]);
-
-            // Verify password
-            const encryptor = new Encryptor(password);
-            if (encryptor.getPasswordHash() !== config.passwordHash) {
-                console.log(chalk.red('✗ Incorrect password'));
-                process.exit(1);
-            }
+            // Get and verify password
+            const password = await getAndVerifyPassword(options.password, DATA_DIR);
 
             spinner.start('Processing file...');
 
@@ -221,17 +202,12 @@ program
     .command('pull <identifier> [output]')
     .description('Download a file from Telegram storage (by filename or hash)')
     .option('-o, --output <path>', 'Output path for the file')
+    .option('-p, --password <password>', 'Encryption password (uses TAS_PASSWORD env var if not provided)')
     .action(async (identifier, output, options) => {
         const spinner = ora('Looking up file...').start();
 
         try {
-            // Load config
-            const configPath = path.join(DATA_DIR, 'config.json');
-            if (!fs.existsSync(configPath)) {
-                spinner.fail('TAS not initialized. Run `tas init` first.');
-                process.exit(1);
-            }
-            const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+            const config = requireConfig(DATA_DIR);
 
             // Find file in index
             const db = new FileIndex(path.join(DATA_DIR, 'index.db'));
@@ -245,22 +221,8 @@ program
 
             spinner.stop();
 
-            // Get password
-            const { password } = await inquirer.prompt([
-                {
-                    type: 'password',
-                    name: 'password',
-                    message: 'Enter your encryption password:',
-                    mask: '*'
-                }
-            ]);
-
-            // Verify password
-            const encryptor = new Encryptor(password);
-            if (encryptor.getPasswordHash() !== config.passwordHash) {
-                console.log(chalk.red('✗ Incorrect password'));
-                process.exit(1);
-            }
+            // Get and verify password
+            const password = await getAndVerifyPassword(options.password, DATA_DIR);
 
             spinner.start('Downloading...');
 
@@ -429,33 +391,12 @@ program
 program
     .command('mount <mountpoint>')
     .description('🔥 Mount Telegram storage as a local folder (FUSE)')
-    .action(async (mountpoint) => {
+    .option('-p, --password <password>', 'Encryption password (uses TAS_PASSWORD env var if not provided)')
+    .action(async (mountpoint, options) => {
         console.log(chalk.cyan('\n🗂️  Mounting Telegram as filesystem...\n'));
 
-        // Load config
-        const configPath = path.join(DATA_DIR, 'config.json');
-        if (!fs.existsSync(configPath)) {
-            console.log(chalk.red('✗ TAS not initialized. Run `tas init` first.'));
-            process.exit(1);
-        }
-        const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-
-        // Get password
-        const { password } = await inquirer.prompt([
-            {
-                type: 'password',
-                name: 'password',
-                message: 'Enter your encryption password:',
-                mask: '*'
-            }
-        ]);
-
-        // Verify password
-        const encryptor = new Encryptor(password);
-        if (encryptor.getPasswordHash() !== config.passwordHash) {
-            console.log(chalk.red('✗ Incorrect password'));
-            process.exit(1);
-        }
+        const config = requireConfig(DATA_DIR);
+        const password = await getAndVerifyPassword(options.password, DATA_DIR);
 
         const spinner = ora('Initializing filesystem...').start();
 
@@ -732,33 +673,12 @@ syncCmd
 syncCmd
     .command('start')
     .description('Start syncing all registered folders')
-    .action(async () => {
+    .option('-p, --password <password>', 'Encryption password (uses TAS_PASSWORD env var if not provided)')
+    .action(async (options) => {
         console.log(chalk.cyan('\n🔄 Starting folder sync...\n'));
 
-        // Load config
-        const configPath = path.join(DATA_DIR, 'config.json');
-        if (!fs.existsSync(configPath)) {
-            console.log(chalk.red('✗ TAS not initialized. Run `tas init` first.'));
-            process.exit(1);
-        }
-        const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-
-        // Get password
-        const { password } = await inquirer.prompt([
-            {
-                type: 'password',
-                name: 'password',
-                message: 'Enter your encryption password:',
-                mask: '*'
-            }
-        ]);
-
-        // Verify password
-        const encryptor = new Encryptor(password);
-        if (encryptor.getPasswordHash() !== config.passwordHash) {
-            console.log(chalk.red('✗ Incorrect password'));
-            process.exit(1);
-        }
+        const config = requireConfig(DATA_DIR);
+        const password = await getAndVerifyPassword(options.password, DATA_DIR);
 
         try {
             const { SyncEngine } = await import('./sync/sync.js');
@@ -825,33 +745,12 @@ syncCmd
 syncCmd
     .command('pull')
     .description('Download all Telegram files to sync folders (two-way sync)')
-    .action(async () => {
+    .option('-p, --password <password>', 'Encryption password (uses TAS_PASSWORD env var if not provided)')
+    .action(async (options) => {
         console.log(chalk.cyan('\n📥 Pulling files from Telegram...\n'));
 
-        // Load config
-        const configPath = path.join(DATA_DIR, 'config.json');
-        if (!fs.existsSync(configPath)) {
-            console.log(chalk.red('✗ TAS not initialized. Run `tas init` first.'));
-            process.exit(1);
-        }
-        const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-
-        // Get password
-        const { password } = await inquirer.prompt([
-            {
-                type: 'password',
-                name: 'password',
-                message: 'Enter your encryption password:',
-                mask: '*'
-            }
-        ]);
-
-        // Verify password
-        const encryptor = new Encryptor(password);
-        if (encryptor.getPasswordHash() !== config.passwordHash) {
-            console.log(chalk.red('✗ Incorrect password'));
-            process.exit(1);
-        }
+        const config = requireConfig(DATA_DIR);
+        const password = await getAndVerifyPassword(options.password, DATA_DIR);
 
         const spinner = ora('Loading...').start();
 
@@ -939,13 +838,7 @@ program
     .action(async () => {
         console.log(chalk.cyan('\n🔍 Verifying file integrity...\n'));
 
-        // Load config
-        const configPath = path.join(DATA_DIR, 'config.json');
-        if (!fs.existsSync(configPath)) {
-            console.log(chalk.red('✗ TAS not initialized. Run `tas init` first.'));
-            process.exit(1);
-        }
-        const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+        const config = requireConfig(DATA_DIR);
 
         const spinner = ora('Checking files...').start();
 
@@ -1078,7 +971,8 @@ program
 program
     .command('resume')
     .description('Resume interrupted uploads')
-    .action(async () => {
+    .option('-p, --password <password>', 'Encryption password (uses TAS_PASSWORD env var if not provided)')
+    .action(async (options) => {
         try {
             const db = new FileIndex(path.join(DATA_DIR, 'index.db'));
             db.init();
@@ -1139,30 +1033,15 @@ program
             }
 
             // Resume uploads
-            const configPath = path.join(DATA_DIR, 'config.json');
-            if (!fs.existsSync(configPath)) {
+            const config = loadConfig(DATA_DIR);
+            if (!config) {
                 console.log(chalk.red('✗ TAS not initialized.'));
                 db.close();
                 return;
             }
-            const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 
-            // Get password
-            const { password } = await inquirer.prompt([
-                {
-                    type: 'password',
-                    name: 'password',
-                    message: 'Enter your encryption password:',
-                    mask: '*'
-                }
-            ]);
-
-            const encryptor = new Encryptor(password);
-            if (encryptor.getPasswordHash() !== config.passwordHash) {
-                console.log(chalk.red('✗ Incorrect password'));
-                db.close();
-                return;
-            }
+            // Get and verify password
+            const password = await getAndVerifyPassword(options.password, DATA_DIR);
 
             // Connect to Telegram
             const { TelegramClient } = await import('./telegram/client.js');
@@ -1230,6 +1109,173 @@ program
 
         } catch (err) {
             console.error(chalk.red('Resume failed:'), err.message);
+            process.exit(1);
+        }
+    });
+
+// ============== SHARE COMMAND ==============
+const shareCmd = program
+    .command('share')
+    .description('🔗 Share files via temporary download links');
+
+shareCmd
+    .command('create <file>')
+    .description('Create a temporary download link for a file')
+    .option('-e, --expire <duration>', 'Expiry duration (e.g. 1h, 24h, 7d)', '24h')
+    .option('-m, --max-downloads <n>', 'Maximum number of downloads', '1')
+    .option('--port <port>', 'HTTP server port', '3000')
+    .option('-p, --password <password>', 'Encryption password')
+    .action(async (file, options) => {
+        console.log(chalk.cyan('\n🔗 Creating share link...\n'));
+
+        const config = requireConfig(DATA_DIR);
+        const password = await getAndVerifyPassword(options.password, DATA_DIR);
+
+        const spinner = ora('Setting up...').start();
+
+        try {
+            const db = new FileIndex(path.join(DATA_DIR, 'index.db'));
+            db.init();
+
+            const fileRecord = db.findByHash(file) || db.findByName(file);
+            if (!fileRecord) {
+                spinner.fail(`File not found: ${file}`);
+                process.exit(1);
+            }
+
+            // Generate token and calculate expiry
+            const { generateToken, parseDuration } = await import('./share/server.js');
+            const token = generateToken();
+            const expiresAt = new Date(Date.now() + parseDuration(options.expire)).toISOString();
+            const maxDownloads = parseInt(options.maxDownloads) || 1;
+
+            // Add share to DB
+            db.addShare(fileRecord.id, token, expiresAt, maxDownloads);
+
+            // Start share server
+            const { ShareServer } = await import('./share/server.js');
+            const port = parseInt(options.port) || 3000;
+
+            const server = new ShareServer({
+                dataDir: DATA_DIR,
+                password,
+                config,
+                port
+            });
+
+            await server.initialize();
+            await server.start();
+
+            spinner.succeed('Share server running!');
+
+            // Get local IP for network sharing
+            const { networkInterfaces } = await import('os');
+            const nets = networkInterfaces();
+            let localIP = 'localhost';
+            for (const name of Object.keys(nets)) {
+                for (const net of nets[name]) {
+                    if (net.family === 'IPv4' && !net.internal) {
+                        localIP = net.address;
+                        break;
+                    }
+                }
+            }
+
+            console.log(chalk.cyan('\n📎 Share Links:\n'));
+            console.log(`  ${chalk.white('Local:')}    ${chalk.green(`http://localhost:${port}/d/${token}`)}`);
+            console.log(`  ${chalk.white('Network:')}  ${chalk.green(`http://${localIP}:${port}/d/${token}`)}`);
+            console.log();
+            console.log(chalk.dim(`  File:       ${fileRecord.filename}`));
+            console.log(chalk.dim(`  Expires:    ${options.expire}`));
+            console.log(chalk.dim(`  Downloads:  ${maxDownloads} max`));
+            console.log(chalk.dim(`  Token:      ${token.substring(0, 8)}...`));
+            console.log();
+            console.log(chalk.yellow('Press Ctrl+C to stop the share server'));
+
+            // Handle graceful shutdown
+            const cleanup = async () => {
+                console.log(chalk.dim('\n\nStopping share server...'));
+                await server.stop();
+                console.log(chalk.green('✓ Share server stopped'));
+                process.exit(0);
+            };
+
+            process.on('SIGINT', cleanup);
+            process.on('SIGTERM', cleanup);
+
+            // Keep process running
+            await new Promise(() => { });
+
+        } catch (err) {
+            spinner.fail(`Share failed: ${err.message}`);
+            process.exit(1);
+        }
+    });
+
+shareCmd
+    .command('list')
+    .description('List all active share links')
+    .action(async () => {
+        try {
+            const db = new FileIndex(path.join(DATA_DIR, 'index.db'));
+            db.init();
+
+            // Clean expired first
+            const cleaned = db.cleanExpiredShares();
+            if (cleaned > 0) {
+                console.log(chalk.dim(`  (${cleaned} expired shares cleaned)`));
+            }
+
+            const shares = db.listShares();
+
+            if (shares.length === 0) {
+                console.log(chalk.yellow('\n📭 No active shares. Use `tas share create <file>` to create one.\n'));
+            } else {
+                console.log(chalk.cyan(`\n🔗 Active Shares (${shares.length})\n`));
+
+                for (const share of shares) {
+                    const expired = new Date(share.expires_at) < new Date();
+                    const status = expired
+                        ? chalk.red('expired')
+                        : chalk.green('active');
+
+                    console.log(`  ${chalk.blue('●')} ${share.filename}`);
+                    console.log(chalk.dim(`    Token: ${share.token.substring(0, 8)}...  Status: ${status}  Downloads: ${share.download_count}/${share.max_downloads}`));
+                    console.log(chalk.dim(`    Expires: ${new Date(share.expires_at).toLocaleString()}`));
+                }
+                console.log();
+            }
+
+            db.close();
+        } catch (err) {
+            console.error(chalk.red('Error:'), err.message);
+            process.exit(1);
+        }
+    });
+
+shareCmd
+    .command('revoke <token>')
+    .description('Revoke a share link')
+    .action(async (token) => {
+        try {
+            const db = new FileIndex(path.join(DATA_DIR, 'index.db'));
+            db.init();
+
+            // Support partial token match
+            const shares = db.listShares();
+            const match = shares.find(s => s.token === token || s.token.startsWith(token));
+
+            if (!match) {
+                console.log(chalk.red(`✗ Share not found: ${token}`));
+                process.exit(1);
+            }
+
+            db.revokeShare(match.token);
+            console.log(chalk.green(`✓ Revoked share for "${match.filename}"`));
+
+            db.close();
+        } catch (err) {
+            console.error(chalk.red('Error:'), err.message);
             process.exit(1);
         }
     });

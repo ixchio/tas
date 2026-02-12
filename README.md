@@ -1,11 +1,11 @@
-# TAS — Telegram as Storage
+# Telegram as Storage
 
 [![CI](https://github.com/ixchio/tas/actions/workflows/ci.yml/badge.svg)](https://github.com/ixchio/tas/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@nightowne/tas-cli)](https://www.npmjs.com/package/@nightowne/tas-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 <p align="center">
-  <img src="assets/demo.gif" alt="TAS Demo" width="600">
+  <img src="assets/demo.gif" alt="Demo" width="600">
 </p>
 
 A CLI tool that uses your Telegram bot as encrypted file storage. Files are compressed, encrypted locally, then uploaded to your private bot chat.
@@ -26,16 +26,16 @@ A CLI tool that uses your Telegram bot as encrypted file storage. Files are comp
 
 | Feature | TAS | Session-based tools (e.g. teldrive) |
 |---------|:---:|:-----------------------------------:|
-| Account ban risk | **None** (Bot API) | High (session hijack detection) |
+| Account ban risk | None (Bot API) | High (session hijack detection) |
 | Encryption | AES-256-GCM | Usually none |
 | Dependencies | SQLite only | Rclone, external DB |
 | Setup complexity | 2 minutes | Docker + multiple services |
 
-**Key differences:**
-- Uses **Bot API**, not session-based auth — Telegram can't ban your account
-- **Encryption by default** — files encrypted before leaving your machine
-- **Local-first** — SQLite index, no cloud dependencies
-- **FUSE mount** — use Telegram like a folder
+Key differences:
+- Uses Bot API, not session-based auth - Telegram can't ban your account
+- Encryption by default - files encrypted before leaving your machine
+- Local-first - SQLite index, no cloud dependencies
+- FUSE mount - use Telegram like a folder
 
 ## Security Model
 
@@ -51,11 +51,11 @@ Your password never leaves your machine. Telegram stores encrypted blobs.
 
 ## Limitations
 
-- **Not a backup** — Telegram can delete content without notice
-- **No versioning** — overwriting a file deletes the old version
-- **49MB chunks** — files split due to Bot API limits
-- **FUSE required** — mount feature needs `libfuse` on Linux/macOS
-- **Single user** — designed for personal use, not multi-tenant
+- Not a backup - Telegram can delete content without notice
+- No versioning - overwriting a file deletes the old version
+- 49MB chunks - files split due to Bot API limits
+- FUSE required - mount feature needs libfuse on Linux/macOS
+- Single user - designed for personal use, not multi-tenant
 
 ## Quick Start
 
@@ -122,9 +122,35 @@ tas sync start              # Start watching
 tas sync pull               # Download all to sync folders
 tas sync status             # Show sync status
 
+# Share (temporary links)
+tas share create <file>     # Create download link
+tas share create <file> --expire 1h --max-downloads 3
+tas share list              # Show active shares
+tas share revoke <token>    # Revoke a share
+
 # Verification
 tas verify                  # Check file integrity
 ```
+
+## Automation
+
+Skip password prompts for scripts and CI/CD:
+
+```bash
+# Environment variable
+export TAS_PASSWORD="your-password"
+tas push file.pdf
+tas sync start
+
+# Or use CLI flag (recommended for CI/CD)
+tas push -p "password" file.pdf
+```
+
+Works great with:
+- Cron jobs for automated backups
+- GitHub Actions and GitLab CI
+- Docker containers
+- Shell scripts for batch operations
 
 ## Auto-Start (systemd)
 

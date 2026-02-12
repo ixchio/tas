@@ -92,6 +92,22 @@ export class FileIndex {
       );
     `);
 
+    // Create shares table for temporary file sharing
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS shares (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_id INTEGER NOT NULL,
+        token TEXT UNIQUE NOT NULL,
+        expires_at TEXT NOT NULL,
+        max_downloads INTEGER NOT NULL DEFAULT 1,
+        download_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_shares_token ON shares(token);
+    `);
+
     // Create pending_uploads table for resume functionality
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS pending_uploads (
@@ -490,6 +506,76 @@ export class FileIndex {
   getPendingByHash(hash) {
     const stmt = this.db.prepare('SELECT * FROM pending_uploads WHERE hash = ?');
     return stmt.get(hash);
+  }
+
+  // ============== SHARE METHODS ==============
+
+  /**
+   * Create a share link for a file
+   */
+  addShare(fileId, token, expiresAt, maxDownloads = 1) {
+    const stmt = this.db.prepare(`
+      INSERT INTO shares (file_id, token, expires_at, max_downloads)
+      VALUES (?, ?, ?, ?)
+    `);
+    const result = stmt.run(fileId, token, expiresAt, maxDownloads);
+    return result.lastInsertRowid;
+  }
+
+  /**
+   * Get a share by token (returns null if not found)
+   */
+  getShare(token) {
+    const stmt = this.db.prepare(`
+      SELECT s.*, f.filename, f.original_size
+      FROM shares s
+      JOIN files f ON s.file_id = f.id
+      WHERE s.token = ?
+    `);
+    return stmt.get(token) || null;
+  }
+
+  /**
+   * List all active shares
+   */
+  listShares() {
+    const stmt = this.db.prepare(`
+      SELECT s.*, f.filename, f.original_size
+      FROM shares s
+      JOIN files f ON s.file_id = f.id
+      ORDER BY s.created_at DESC
+    `);
+    return stmt.all();
+  }
+
+  /**
+   * Revoke (delete) a share by token
+   */
+  revokeShare(token) {
+    const stmt = this.db.prepare('DELETE FROM shares WHERE token = ?');
+    const result = stmt.run(token);
+    return result.changes > 0;
+  }
+
+  /**
+   * Increment download count for a share
+   */
+  incrementShareDownload(token) {
+    const stmt = this.db.prepare(`
+      UPDATE shares SET download_count = download_count + 1 WHERE token = ?
+    `);
+    stmt.run(token);
+  }
+
+  /**
+   * Remove expired shares
+   */
+  cleanExpiredShares() {
+    const stmt = this.db.prepare(`
+      DELETE FROM shares WHERE
+        REPLACE(REPLACE(expires_at, 'T', ' '), 'Z', '') < strftime('%Y-%m-%d %H:%M:%f', 'now')
+    `);
+    return stmt.run().changes;
   }
 
   /**
