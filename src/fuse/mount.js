@@ -130,26 +130,35 @@ export class TelegramFS {
     }
 
     /**
-     * Read file contents
+     * Read file contents from disk cache
      */
     async read(filepath, fd, buffer, length, position, cb) {
         const filename = path.basename(filepath);
 
         try {
-            // Check cache first
-            let data = this.getCached(filename);
-
-            if (!data) {
-                // Download and decrypt
-                data = await this.downloadFile(filename);
-                this.setCache(filename, data);
+            // Check write buffers first
+            const wb = this.writeBuffers.get(filename);
+            if (wb) {
+                const slice = wb.data.subarray(position, position + length);
+                slice.copy(buffer);
+                return cb(slice.length);
             }
 
-            // Copy requested portion to buffer
-            const slice = data.subarray(position, position + length);
-            slice.copy(buffer);
+            // Check cache first
+            let cachedPath = this.getCached(filename);
 
-            return cb(slice.length);
+            if (!cachedPath) {
+                // Download, decrypt, and save to disk cache
+                cachedPath = await this.downloadFileToCache(filename);
+                this.setCache(filename, cachedPath);
+            }
+
+            // Copy requested portion to buffer from disk
+            const fdDisk = fs.openSync(cachedPath, 'r');
+            const bytesRead = fs.readSync(fdDisk, buffer, 0, length, position);
+            fs.closeSync(fdDisk);
+
+            return cb(bytesRead);
         } catch (err) {
             console.error('Read error:', err.message);
             return cb(Fuse.EIO);
@@ -305,10 +314,10 @@ export class TelegramFS {
 
         // Get or load into write buffer
         if (!this.writeBuffers.has(filename)) {
-            const cached = this.getCached(filename);
-            if (cached) {
+            const cachedPath = this.getCached(filename);
+            if (cachedPath) {
                 this.writeBuffers.set(filename, {
-                    data: Buffer.from(cached),
+                    data: fs.readFileSync(cachedPath), // Note: RAM buffer here could be big, but it's okay for truncate/writes right now
                     modified: true
                 });
             } else {
@@ -335,38 +344,81 @@ export class TelegramFS {
 
     // ============== Helper Methods ==============
 
-    async downloadFile(filename) {
+    async downloadFileToCache(filename) {
         const file = this.db.findByName(filename);
         if (!file) throw new Error('File not found');
+
+        const cacheDir = path.join(this.dataDir, 'cache');
+        if (!fs.existsSync(cacheDir)) {
+            fs.mkdirSync(cacheDir, { recursive: true });
+        }
+
+        const outputPath = path.join(cacheDir, file.hash);
+
+        // If it's already fully downloaded and cached on disk, return path
+        if (fs.existsSync(outputPath)) {
+            const stats = fs.statSync(outputPath);
+            if (stats.size === file.original_size) {
+                return outputPath;
+            }
+        }
 
         const chunks = this.db.getChunks(file.id);
         if (chunks.length === 0) throw new Error('No chunks found');
 
-        // Download all chunks
-        const downloadedChunks = [];
+        // Pre-sort chunks
+        chunks.sort((a, b) => a.chunk_index - b.chunk_index);
 
-        for (const chunk of chunks) {
-            const data = await this.client.downloadFile(chunk.file_telegram_id);
-            const header = parseHeader(data);
-            const payload = data.subarray(HEADER_SIZE);
+        const firstChunkData = await this.client.downloadFile(chunks[0].file_telegram_id);
+        const header = parseHeader(firstChunkData);
+        let wasCompressed = header.compressed;
 
-            downloadedChunks.push({
-                index: header.chunkIndex,
-                data: payload,
-                compressed: header.compressed
-            });
-        }
+        const decryptStream = this.encryptor.getDecryptStream();
+        const decompressStream = this.compressor.getDecompressStream(wasCompressed);
 
-        // Reassemble
-        downloadedChunks.sort((a, b) => a.index - b.index);
-        const encryptedData = Buffer.concat(downloadedChunks.map(c => c.data));
+        const { Readable } = await import('stream');
+        const { pipeline } = await import('stream/promises');
 
-        // Decrypt
-        const compressedData = this.encryptor.decrypt(encryptedData);
+        const self = this;
+        let currentChunkIndex = 0;
+        let preloadedFirstChunk = firstChunkData;
 
-        // Decompress
-        const wasCompressed = downloadedChunks[0].compressed;
-        return await this.compressor.decompress(compressedData, wasCompressed);
+        const downloadStream = new Readable({
+            async read() {
+                try {
+                    if (currentChunkIndex >= chunks.length) {
+                        this.push(null);
+                        return;
+                    }
+
+                    const chunk = chunks[currentChunkIndex];
+                    let data;
+                    if (currentChunkIndex === 0 && preloadedFirstChunk) {
+                        data = preloadedFirstChunk;
+                        preloadedFirstChunk = null;
+                    } else {
+                        data = await self.client.downloadFile(chunk.file_telegram_id);
+                    }
+
+                    const payload = data.subarray(HEADER_SIZE);
+                    this.push(payload);
+                    currentChunkIndex++;
+                } catch (err) {
+                    this.destroy(err);
+                }
+            }
+        });
+
+        const tmpOutputPath = outputPath + '.tmp';
+        const writeStream = fs.createWriteStream(tmpOutputPath);
+
+        // Pipeline: Telegram -> Decrypt -> Decompress -> Disk Cache
+        await pipeline(downloadStream, decryptStream, decompressStream, writeStream);
+
+        // Rename to final atomic path
+        fs.renameSync(tmpOutputPath, outputPath);
+
+        return outputPath;
     }
 
     async uploadFile(filename, data) {
@@ -399,7 +451,7 @@ export class TelegramFS {
         const encryptedData = this.encryptor.encrypt(compressedData);
 
         // Create temp file with header
-        const tempDir = path.join(this.dataDir, 'tmp');
+        const tempDir = process.env.TAS_TMP_DIR || path.join(this.dataDir, 'tmp');
         if (!fs.existsSync(tempDir)) {
             fs.mkdirSync(tempDir, { recursive: true });
         }
@@ -438,22 +490,34 @@ export class TelegramFS {
         if (!entry) return null;
 
         if (Date.now() - entry.timestamp > CACHE_TTL) {
+            // Expired, delete the file if possible
+            try {
+                if (fs.existsSync(entry.path)) fs.unlinkSync(entry.path);
+            } catch (e) { }
             fileCache.delete(filename);
             return null;
         }
 
-        return entry.data;
+        // Extend cache TTL on read
+        entry.timestamp = Date.now();
+        return entry.path;
     }
 
-    setCache(filename, data) {
+    setCache(filename, cachePath) {
         fileCache.set(filename, {
-            data,
+            path: cachePath,
             timestamp: Date.now()
         });
     }
 
     invalidateCache(filename) {
-        fileCache.delete(filename);
+        const entry = fileCache.get(filename);
+        if (entry) {
+            try {
+                if (fs.existsSync(entry.path)) fs.unlinkSync(entry.path);
+            } catch (e) { }
+            fileCache.delete(filename);
+        }
     }
 
     /**

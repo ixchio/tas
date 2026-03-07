@@ -3,6 +3,7 @@
  */
 
 import crypto from 'crypto';
+import { Transform } from 'stream';
 
 const ALGORITHM = 'aes-256-gcm';
 const KEY_LENGTH = 32; // 256 bits
@@ -67,6 +68,41 @@ export class Encryptor {
     }
 
     /**
+     * Get an encryption transform stream
+     * Needs to append the salt/iv to the stream begin, and authTag to the stream end
+     */
+    getEncryptStream() {
+        const salt = crypto.randomBytes(SALT_LENGTH);
+        const iv = crypto.randomBytes(IV_LENGTH);
+        const key = this.deriveKey(salt);
+        const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
+
+        let headerWritten = false;
+
+        return new Transform({
+            transform(chunk, encoding, callback) {
+                if (!headerWritten) {
+                    this.push(Buffer.concat([salt, iv]));
+                    headerWritten = true;
+                }
+                const encrypted = cipher.update(chunk);
+                if (encrypted.length > 0) {
+                    this.push(encrypted);
+                }
+                callback();
+            },
+            flush(callback) {
+                const final = cipher.final();
+                if (final.length > 0) {
+                    this.push(final);
+                }
+                this.push(cipher.getAuthTag());
+                callback();
+            }
+        });
+    }
+
+    /**
      * Decrypt data
      * Input: Buffer containing [salt (32) | iv (12) | ciphertext | authTag (16)]
      */
@@ -89,6 +125,98 @@ export class Encryptor {
             decipher.update(ciphertext),
             decipher.final()
         ]);
+    }
+
+    /**
+     * Get a decryption transform stream
+     * Expects [salt (32) | iv (12) | ciphertext | authTag (16)]
+     */
+    getDecryptStream() {
+        let salt = null;
+        let iv = null;
+        let authTag = null;
+        let key = null;
+        let decipher = null;
+
+        // Buffer for storing the salt and iv during the first few chunks
+        let headerBuffer = Buffer.alloc(0);
+        let headerRead = false;
+
+        // We must buffer the last 16 bytes across chunks because it's the authTag
+        let tailBuffer = Buffer.alloc(0);
+
+        const self = this;
+
+        return new Transform({
+            transform(chunk, encoding, callback) {
+                try {
+                    // 1. Read the header (salt + iv)
+                    if (!headerRead) {
+                        headerBuffer = Buffer.concat([headerBuffer, chunk]);
+
+                        if (headerBuffer.length >= SALT_LENGTH + IV_LENGTH) {
+                            salt = headerBuffer.subarray(0, SALT_LENGTH);
+                            iv = headerBuffer.subarray(SALT_LENGTH, SALT_LENGTH + IV_LENGTH);
+                            key = self.deriveKey(salt);
+                            decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
+
+                            // The rest of the header buffer is ciphertext
+                            const remaining = headerBuffer.subarray(SALT_LENGTH + IV_LENGTH);
+                            headerBuffer = null; // free memory
+                            headerRead = true;
+
+                            // Push remaining into tailBuffer for processing
+                            if (remaining.length > 0) {
+                                tailBuffer = Buffer.concat([tailBuffer, remaining]);
+                            }
+                        }
+                    } else {
+                        tailBuffer = Buffer.concat([tailBuffer, chunk]);
+                    }
+
+                    // 2. Process ciphertext, keeping exactly TAG_LENGTH bytes in tailBuffer
+                    if (headerRead && tailBuffer.length > TAG_LENGTH) {
+                        const processLength = tailBuffer.length - TAG_LENGTH;
+                        const toProcess = tailBuffer.subarray(0, processLength);
+
+                        const decrypted = decipher.update(toProcess);
+                        if (decrypted.length > 0) {
+                            this.push(decrypted);
+                        }
+
+                        // Keep only the end
+                        tailBuffer = tailBuffer.subarray(processLength);
+                    }
+
+                    callback();
+                } catch (err) {
+                    callback(err);
+                }
+            },
+            flush(callback) {
+                try {
+                    if (!headerRead) {
+                        return callback(new Error('Invalid encrypted data stream: too short'));
+                    }
+
+                    if (tailBuffer.length !== TAG_LENGTH) {
+                        return callback(new Error(`Invalid encrypted data stream: missing auth tag. Got ${tailBuffer.length} bytes, expected ${TAG_LENGTH}`));
+                    }
+
+                    authTag = tailBuffer;
+                    decipher.setAuthTag(authTag);
+
+                    const final = decipher.final();
+                    if (final.length > 0) {
+                        this.push(final);
+                    }
+
+                    callback();
+                } catch (err) {
+                    callback(new Error(`Decryption failed: wrong password or corrupt data (${err.message})`));
+                }
+            }
+        });
     }
 }
 

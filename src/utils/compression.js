@@ -8,6 +8,7 @@ import path from 'path';
 
 const gzip = promisify(zlib.gzip);
 const gunzip = promisify(zlib.gunzip);
+import { PassThrough } from 'stream';
 
 // File extensions that are already compressed (skip compression for these)
 const SKIP_COMPRESSION = new Set([
@@ -72,6 +73,24 @@ export class Compressor {
     }
 
     /**
+     * Get a compression transform stream
+     * Returns: { stream: Transform, compressed: boolean }
+     */
+    getCompressStream(filename = '') {
+        if (this.shouldSkip(filename)) {
+            return {
+                stream: new PassThrough(),
+                compressed: false
+            };
+        }
+
+        return {
+            stream: zlib.createGzip({ level: 6 }),
+            compressed: true
+        };
+    }
+
+    /**
      * Decompress gzip data
      */
     async decompress(data, wasCompressed) {
@@ -80,5 +99,16 @@ export class Compressor {
         }
 
         return await gunzip(data);
+    }
+
+    /**
+     * Get a decompression transform stream
+     */
+    getDecompressStream(wasCompressed) {
+        if (!wasCompressed) {
+            return new PassThrough();
+        }
+
+        return zlib.createGunzip();
     }
 }

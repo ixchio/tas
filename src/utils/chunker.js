@@ -91,7 +91,17 @@ export function createHeader(filename, originalSize, chunkIndex, totalChunks, fl
     offset += 2;
 
     // Filename length
-    const filenameBytes = Buffer.from(filename, 'utf-8').subarray(0, 42);
+    let filenameBytes = Buffer.from(filename, 'utf-8');
+    if (filenameBytes.length > 42) {
+        // We carefully truncate by chars instead of bytes to avoid splitting a UTF-8 character in half!
+        let truncated = filename;
+        while (Buffer.from(truncated, 'utf-8').length > 42) {
+            // Remove one character at a time from the end
+            truncated = truncated.slice(0, -1);
+        }
+        filenameBytes = Buffer.from(truncated, 'utf-8');
+    }
+
     header.writeUInt16LE(filenameBytes.length, offset);
     offset += 2;
 

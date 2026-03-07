@@ -674,11 +674,29 @@ syncCmd
     .command('start')
     .description('Start syncing all registered folders')
     .option('-p, --password <password>', 'Encryption password (uses TAS_PASSWORD env var if not provided)')
+    .option('-l, --limit <limit>', 'Bandwidth limit (e.g. 500k, 1m)')
     .action(async (options) => {
         console.log(chalk.cyan('\n🔄 Starting folder sync...\n'));
 
         const config = requireConfig(DATA_DIR);
         const password = await getAndVerifyPassword(options.password, DATA_DIR);
+
+        let limitRate = null;
+        if (options.limit) {
+            const match = options.limit.match(/^(\d+)([kmg]?)$/i);
+            if (!match) {
+                console.error(chalk.red('Invalid limit format. Use e.g. 500{}, 1m'));
+                process.exit(1);
+            }
+            const val = parseInt(match[1]);
+            const unit = match[2].toLowerCase();
+            if (unit === 'k') limitRate = val * 1024;
+            else if (unit === 'm') limitRate = val * 1024 * 1024;
+            else if (unit === 'g') limitRate = val * 1024 * 1024 * 1024;
+            else limitRate = val;
+
+            console.log(chalk.dim(`   Bandwidth limit: ${options.limit}/s`));
+        }
 
         try {
             const { SyncEngine } = await import('./sync/sync.js');
@@ -686,7 +704,8 @@ syncCmd
             const syncEngine = new SyncEngine({
                 dataDir: DATA_DIR,
                 password,
-                config
+                config,
+                limitRate
             });
 
             await syncEngine.initialize();

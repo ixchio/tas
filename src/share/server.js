@@ -241,33 +241,63 @@ export class ShareServer {
     }
 
     /**
-     * Download and decrypt a file from Telegram
+     * Stream a decrypted file from Telegram directly to the HTTP response
      */
-    async downloadAndDecrypt(fileRecord) {
+    async streamToResponse(fileRecord, res) {
         const chunks = this.db.getChunks(fileRecord.id);
         if (chunks.length === 0) throw new Error('No chunks found');
 
-        const downloadedChunks = [];
+        // Pre-sort chunks by index so we download them in correct order
+        chunks.sort((a, b) => a.chunk_index - b.chunk_index);
 
-        for (const chunk of chunks) {
-            const data = await this.client.downloadFile(chunk.file_telegram_id);
-            const header = parseHeader(data);
-            const payload = data.subarray(HEADER_SIZE);
+        // Get total size from first chunk's header
+        const firstChunkData = await this.client.downloadFile(chunks[0].file_telegram_id);
+        const header = parseHeader(firstChunkData);
+        let wasCompressed = header.compressed;
 
-            downloadedChunks.push({
-                index: header.chunkIndex,
-                data: payload,
-                compressed: header.compressed
-            });
-        }
+        // Prepare streams
+        const decryptStream = this.encryptor.getDecryptStream();
+        const decompressStream = this.compressor.getDecompressStream(wasCompressed);
 
-        downloadedChunks.sort((a, b) => a.index - b.index);
-        const encryptedData = Buffer.concat(downloadedChunks.map(c => c.data));
+        // We need a Readable stream that will lazily fetch chunks from Telegram
+        const { Readable } = await import('stream');
+        const { pipeline } = await import('stream/promises');
 
-        const compressedData = this.encryptor.decrypt(encryptedData);
+        const self = this;
+        let currentChunkIndex = 0;
+        let preloadedFirstChunk = firstChunkData;
 
-        const wasCompressed = downloadedChunks[0].compressed;
-        return await this.compressor.decompress(compressedData, wasCompressed);
+        const downloadStream = new Readable({
+            async read() {
+                try {
+                    if (currentChunkIndex >= chunks.length) {
+                        this.push(null); // End of stream
+                        return;
+                    }
+
+                    const chunk = chunks[currentChunkIndex];
+                    let data;
+
+                    if (currentChunkIndex === 0 && preloadedFirstChunk) {
+                        data = preloadedFirstChunk;
+                        preloadedFirstChunk = null;
+                    } else {
+                        data = await self.client.downloadFile(chunk.file_telegram_id);
+                    }
+
+                    // Strip header before pushing
+                    const payload = data.subarray(HEADER_SIZE);
+                    this.push(payload);
+
+                    currentChunkIndex++;
+                } catch (err) {
+                    this.destroy(err);
+                }
+            }
+        });
+
+        // Pipeline: Download from Telegram -> Decrypt -> Decompress -> HTTP Response
+        await pipeline(downloadStream, decryptStream, decompressStream, res);
     }
 
     /**
@@ -330,9 +360,6 @@ export class ShareServer {
                 return;
             }
 
-            // Download the file from Telegram, decrypt, and serve
-            const data = await this.downloadAndDecrypt(fileRecord);
-
             // Increment download count
             this.db.incrementShareDownload(token);
 
@@ -355,9 +382,11 @@ export class ShareServer {
             res.writeHead(200, {
                 'Content-Type': contentType,
                 'Content-Disposition': `attachment; filename="${fileRecord.filename}"`,
-                'Content-Length': data.length
+                'Content-Length': fileRecord.original_size
             });
-            res.end(data);
+
+            // Download the file from Telegram, decrypt, decompress and stream directly to 'res'
+            await this.streamToResponse(fileRecord, res);
 
         } catch (err) {
             console.error('Share server error:', err.message);

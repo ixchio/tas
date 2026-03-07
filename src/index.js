@@ -5,6 +5,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { pipeline } from 'stream/promises';
 import { Encryptor, hashFile } from './crypto/encryption.js';
 import { Compressor } from './utils/compression.js';
 import { Chunker, createHeader, parseHeader, HEADER_SIZE } from './utils/chunker.js';
@@ -23,10 +24,10 @@ export async function processFile(filePath, options) {
 
     onProgress?.('Reading file...');
 
-    // Read file
+    // Read file initially just to get size
     const filename = customName || path.basename(filePath);
-    const fileData = fs.readFileSync(filePath);
-    const originalSize = fileData.length;
+    const stats = fs.statSync(filePath);
+    const originalSize = stats.size;
 
     // Calculate hash
     onProgress?.('Calculating hash...');
@@ -41,56 +42,17 @@ export async function processFile(filePath, options) {
         throw new Error('File already uploaded (duplicate hash)');
     }
 
-    // Compress
-    onProgress?.('Compressing...');
+    // Prepare processing components
     const compressor = new Compressor();
-    const { data: compressedData, compressed } = await compressor.compress(fileData, filename);
-
-    // Encrypt
-    onProgress?.('Encrypting...');
-    const encryptor = new Encryptor(password);
-    const encryptedData = encryptor.encrypt(compressedData);
-
-    // Chunk if needed (Telegram bot limit ~50MB per file)
-    onProgress?.('Preparing chunks...');
-    const chunks = [];
-    const numChunks = Math.ceil(encryptedData.length / TELEGRAM_CHUNK_SIZE);
-
-    for (let i = 0; i < numChunks; i++) {
-        const start = i * TELEGRAM_CHUNK_SIZE;
-        const end = Math.min(start + TELEGRAM_CHUNK_SIZE, encryptedData.length);
-        chunks.push({
-            index: i,
-            total: numChunks,
-            data: encryptedData.subarray(start, end)
-        });
-    }
-
-    // Prepare files with headers
-    const tempDir = path.join(dataDir, 'tmp');
-    if (!fs.existsSync(tempDir)) {
-        fs.mkdirSync(tempDir, { recursive: true });
-    }
-
-    const chunkFiles = [];
+    const { stream: compressStream, compressed } = compressor.getCompressStream(filename);
     const flags = compressed ? 1 : 0;
 
-    for (const chunk of chunks) {
-        const header = createHeader(filename, originalSize, chunk.index, chunk.total, flags);
-        const chunkData = Buffer.concat([header, chunk.data]);
+    const encryptor = new Encryptor(password);
+    const encryptStream = encryptor.getEncryptStream();
 
-        const chunkFilename = chunks.length > 1
-            ? `${hash.substring(0, 12)}.part${chunk.index}.tas`
-            : `${hash.substring(0, 12)}.tas`;
-
-        const chunkPath = path.join(tempDir, chunkFilename);
-        fs.writeFileSync(chunkPath, chunkData);
-
-        chunkFiles.push({
-            index: chunk.index,
-            path: chunkPath,
-            size: chunkData.length
-        });
+    const tempDir = process.env.TAS_TMP_DIR || path.join(dataDir, 'tmp');
+    if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
     }
 
     // Connect to Telegram
@@ -99,41 +61,115 @@ export async function processFile(filePath, options) {
     await client.initialize(config.botToken);
     client.setChatId(config.chatId);
 
-    // Upload chunks
+    // We will stream through a custom Writable chunker
+    const { Writable } = await import('stream');
+
+    // First pass estimation (for calculating total chunks and progress)
+    // We don't know the exact final size due to compression and encryption overhead,
+    // so we'll estimate total chunks and update it if needed.
+    // For small files < 49MB we assume 1 chunk.
+    let estimatedSize = compressed ? originalSize : originalSize + 128; // Add encryption overhead
+    if (compressed && originalSize > 1024 * 1024) estimatedSize = originalSize * 0.8; // Rough guess
+    let estimatedChunks = Math.ceil(estimatedSize / TELEGRAM_CHUNK_SIZE) || 1;
+
+    // Register file in DB
     const fileId = db.addFile({
         filename,
         hash,
         originalSize,
-        storedSize: encryptedData.length,
-        chunks: chunks.length,
+        storedSize: 0, // Will update later
+        chunks: estimatedChunks,
         compressed
     });
 
+    onProgress?.('Processing and uploading streams...');
     let uploadedBytes = 0;
-    const totalBytes = chunkFiles.reduce((acc, c) => acc + c.size, 0);
+    let chunkIndex = 0;
 
-    for (const chunk of chunkFiles) {
-        onProgress?.(`Uploading chunk ${chunk.index + 1}/${chunkFiles.length}...`);
+    let currentChunkBuffer = Buffer.alloc(0);
+    let totalStoredSize = 0;
 
-        const caption = chunks.length > 1
-            ? `📦 ${filename} (${chunk.index + 1}/${chunks.length})`
+    // Helper to upload a single chunk
+    const uploadCurrentChunk = async (isFinal = false) => {
+        if (currentChunkBuffer.length === 0 && !isFinal) return; // Nothing to upload
+        if (currentChunkBuffer.length === 0 && isFinal && chunkIndex > 0) return; // Empty final chunk after perfect split
+
+        // At this point we know if it's the final chunk, so we know the total chunks
+        const totalChunks = isFinal ? chunkIndex + 1 : Math.max(estimatedChunks, chunkIndex + 1);
+
+        const header = createHeader(filename, originalSize, chunkIndex, totalChunks, flags);
+        const chunkData = Buffer.concat([header, currentChunkBuffer]);
+
+        const chunkFilename = totalChunks > 1
+            ? `${hash.substring(0, 12)}.part${chunkIndex}.tas`
+            : `${hash.substring(0, 12)}.tas`;
+
+        const chunkPath = path.join(tempDir, chunkFilename);
+        fs.writeFileSync(chunkPath, chunkData);
+
+        const caption = totalChunks > 1
+            ? `📦 ${filename} (${chunkIndex + 1}/${totalChunks})`
             : `📦 ${filename}`;
 
-        const result = await client.sendFile(chunk.path, caption);
+        onProgress?.(`Uploading chunk ${chunkIndex + 1}...`);
 
-        uploadedBytes += chunk.size;
-        onByteProgress?.({ uploaded: uploadedBytes, total: totalBytes, chunk: chunk.index + 1, totalChunks: chunkFiles.length });
+        const result = await client.sendFile(chunkPath, caption);
 
-        // Store file_id instead of message_id for downloads
-        db.addChunk(fileId, chunk.index, result.messageId.toString(), chunk.size);
+        uploadedBytes += chunkData.length;
+        totalStoredSize += currentChunkBuffer.length;
 
-        // Also store file_id for easier retrieval
+        onByteProgress?.({ uploaded: uploadedBytes, total: estimatedSize, chunk: chunkIndex + 1, totalChunks });
+
+        // Store file_id
+        db.addChunk(fileId, chunkIndex, result.messageId.toString(), chunkData.length);
         db.db.prepare('UPDATE chunks SET file_telegram_id = ? WHERE file_id = ? AND chunk_index = ?')
-            .run(result.fileId, fileId, chunk.index);
+            .run(result.fileId, fileId, chunkIndex);
 
-        // Clean up temp file
-        fs.unlinkSync(chunk.path);
-    }
+        // Clean up temp file immediately to save disk space
+        fs.unlinkSync(chunkPath);
+
+        chunkIndex++;
+        currentChunkBuffer = Buffer.alloc(0);
+    };
+
+    const chunkingStream = new Writable({
+        async write(chunk, encoding, callback) {
+            currentChunkBuffer = Buffer.concat([currentChunkBuffer, chunk]);
+
+            // If we exceeded the chunk limit, flush it
+            if (currentChunkBuffer.length >= TELEGRAM_CHUNK_SIZE) {
+                const overflow = currentChunkBuffer.subarray(TELEGRAM_CHUNK_SIZE);
+                currentChunkBuffer = currentChunkBuffer.subarray(0, TELEGRAM_CHUNK_SIZE);
+
+                try {
+                    await uploadCurrentChunk(false);
+                    currentChunkBuffer = overflow; // carry over
+                    callback();
+                } catch (err) {
+                    callback(err);
+                }
+            } else {
+                callback();
+            }
+        },
+        async final(callback) {
+            try {
+                await uploadCurrentChunk(true);
+                callback();
+            } catch (err) {
+                callback(err);
+            }
+        }
+    });
+
+    const readStream = fs.createReadStream(filePath);
+
+    // Run the pipeline: Read -> Compress -> Encrypt -> Chunk & Upload
+    await pipeline(readStream, compressStream, encryptStream, chunkingStream);
+
+    // Update the DB with the final accurate values 
+    db.db.prepare('UPDATE files SET stored_size = ?, chunks = ? WHERE id = ?')
+        .run(totalStoredSize, chunkIndex, fileId);
 
     db.close();
 
@@ -148,8 +184,8 @@ export async function processFile(filePath, options) {
         filename,
         hash,
         originalSize,
-        storedSize: encryptedData.length,
-        chunks: chunks.length,
+        storedSize: totalStoredSize,
+        chunks: chunkIndex,
         compressed
     };
 }
@@ -173,57 +209,91 @@ export async function retrieveFile(fileRecord, options) {
         throw new Error('No chunk metadata found for this file');
     }
 
+    // Prepare components
+    const encryptor = new Encryptor(password);
+    const decryptStream = encryptor.getDecryptStream();
+
+    const tempDir = process.env.TAS_TMP_DIR || path.join(dataDir, 'tmp');
+    if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+    }
+
     // Connect to Telegram
     const client = new TelegramClient(dataDir);
     await client.initialize(config.botToken);
     client.setChatId(config.chatId);
 
-    // Download all chunks
-    const downloadedChunks = [];
-    let downloadedBytes = 0;
-    const totalBytes = fileRecord.stored_size || chunks.reduce((acc, c) => acc + (c.size || 0), 0);
+    // Get total size from first chunk's header, or from DB
+    const firstChunkData = await client.downloadFile(chunks[0].file_telegram_id);
+    const header = parseHeader(firstChunkData);
 
-    for (const chunk of chunks) {
-        onProgress?.(`Downloading chunk ${chunk.chunk_index + 1}/${chunks.length}...`);
+    // Total original uncompressed size
+    let expectedOriginalSize = header.originalSize;
+    let wasCompressed = header.compressed;
 
-        const data = await client.downloadFile(chunk.file_telegram_id);
-        downloadedBytes += data.length;
-        onByteProgress?.({ downloaded: downloadedBytes, total: totalBytes, chunk: chunk.chunk_index + 1, totalChunks: chunks.length });
-
-        // Parse header
-        const header = parseHeader(data);
-        const payload = data.subarray(HEADER_SIZE);
-
-        downloadedChunks.push({
-            index: header.chunkIndex,
-            total: header.totalChunks,
-            data: payload,
-            compressed: header.compressed
-        });
-    }
-
-    // Reassemble
-    onProgress?.('Reassembling...');
-    downloadedChunks.sort((a, b) => a.index - b.index);
-    const encryptedData = Buffer.concat(downloadedChunks.map(c => c.data));
-
-    // Decrypt
-    onProgress?.('Decrypting...');
-    const encryptor = new Encryptor(password);
-    const compressedData = encryptor.decrypt(encryptedData);
-
-    // Decompress
-    onProgress?.('Decompressing...');
     const compressor = new Compressor();
-    const wasCompressed = downloadedChunks[0].compressed;
-    const originalData = await compressor.decompress(compressedData, wasCompressed);
+    const decompressStream = compressor.getDecompressStream(wasCompressed);
 
-    // Write to output
-    onProgress?.('Writing file...');
-    fs.writeFileSync(outputPath, originalData);
+    // We need a Readable stream that will lazily fetch chunks from Telegram
+    // and push them into the decryption pipeline.
+    const { Readable } = await import('stream');
+
+    const totalBytes = fileRecord.stored_size || chunks.reduce((acc, c) => acc + (c.size || 0), 0);
+    let downloadedBytes = 0;
+
+    // Pre-sort chunks by index so we download them in correct order
+    chunks.sort((a, b) => a.chunk_index - b.chunk_index);
+
+    let currentChunkIndex = 0;
+
+    // We already downloaded the first chunk to inspect its header, we shouldn't discard it.
+    let preloadedFirstChunk = firstChunkData;
+
+    const downloadStream = new Readable({
+        async read() {
+            try {
+                if (currentChunkIndex >= chunks.length) {
+                    this.push(null); // End of stream
+                    return;
+                }
+
+                const chunk = chunks[currentChunkIndex];
+                onProgress?.(`Downloading chunk ${chunk.chunk_index + 1}/${chunks.length}...`);
+
+                let data;
+                if (currentChunkIndex === 0 && preloadedFirstChunk) {
+                    data = preloadedFirstChunk;
+                    preloadedFirstChunk = null;
+                } else {
+                    data = await client.downloadFile(chunk.file_telegram_id);
+                }
+
+                downloadedBytes += data.length;
+                onByteProgress?.({ downloaded: downloadedBytes, total: totalBytes, chunk: chunk.chunk_index + 1, totalChunks: chunks.length });
+
+                // Strip header before pushing
+                const payload = data.subarray(HEADER_SIZE);
+                this.push(payload);
+
+                currentChunkIndex++;
+            } catch (err) {
+                this.destroy(err);
+            }
+        }
+    });
+
+    const writeStream = fs.createWriteStream(outputPath);
+    const { pipeline } = await import('stream/promises');
+
+    onProgress?.('Decrypting, decompressing, and writing file...');
+
+    // Pipeline: Download from Telegram -> Decrypt -> Decompress -> Disk
+    await pipeline(downloadStream, decryptStream, decompressStream, writeStream);
+
+    const finalStats = fs.statSync(outputPath);
 
     return {
         path: outputPath,
-        size: originalData.length
+        size: finalStats.size
     };
 }

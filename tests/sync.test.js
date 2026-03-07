@@ -10,20 +10,19 @@ import { FileIndex } from '../src/db/index.js';
 
 const TEST_DB_PATH = '/tmp/tas-test-sync.db';
 
+function cleanupDB(dbPath) {
+    const files = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`];
+    files.forEach(f => {
+        if (fs.existsSync(f)) fs.unlinkSync(f);
+    });
+}
+
 describe('Sync Folders', () => {
     let db;
 
     beforeEach(() => {
         // Clean up any existing test database
-        if (fs.existsSync(TEST_DB_PATH)) {
-            fs.unlinkSync(TEST_DB_PATH);
-        }
-        if (fs.existsSync(TEST_DB_PATH + '-wal')) {
-            fs.unlinkSync(TEST_DB_PATH + '-wal');
-        }
-        if (fs.existsSync(TEST_DB_PATH + '-shm')) {
-            fs.unlinkSync(TEST_DB_PATH + '-shm');
-        }
+        cleanupDB(TEST_DB_PATH);
 
         db = new FileIndex(TEST_DB_PATH);
         db.init();
@@ -33,15 +32,7 @@ describe('Sync Folders', () => {
         if (db) {
             db.close();
         }
-        if (fs.existsSync(TEST_DB_PATH)) {
-            fs.unlinkSync(TEST_DB_PATH);
-        }
-        if (fs.existsSync(TEST_DB_PATH + '-wal')) {
-            fs.unlinkSync(TEST_DB_PATH + '-wal');
-        }
-        if (fs.existsSync(TEST_DB_PATH + '-shm')) {
-            fs.unlinkSync(TEST_DB_PATH + '-shm');
-        }
+        cleanupDB(TEST_DB_PATH);
     });
 
     test('can add sync folder', () => {
@@ -86,15 +77,7 @@ describe('Sync State', () => {
     let folderId;
 
     beforeEach(() => {
-        if (fs.existsSync(TEST_DB_PATH)) {
-            fs.unlinkSync(TEST_DB_PATH);
-        }
-        if (fs.existsSync(TEST_DB_PATH + '-wal')) {
-            fs.unlinkSync(TEST_DB_PATH + '-wal');
-        }
-        if (fs.existsSync(TEST_DB_PATH + '-shm')) {
-            fs.unlinkSync(TEST_DB_PATH + '-shm');
-        }
+        cleanupDB(TEST_DB_PATH);
 
         db = new FileIndex(TEST_DB_PATH);
         db.init();
@@ -105,15 +88,7 @@ describe('Sync State', () => {
         if (db) {
             db.close();
         }
-        if (fs.existsSync(TEST_DB_PATH)) {
-            fs.unlinkSync(TEST_DB_PATH);
-        }
-        if (fs.existsSync(TEST_DB_PATH + '-wal')) {
-            fs.unlinkSync(TEST_DB_PATH + '-wal');
-        }
-        if (fs.existsSync(TEST_DB_PATH + '-shm')) {
-            fs.unlinkSync(TEST_DB_PATH + '-shm');
-        }
+        cleanupDB(TEST_DB_PATH);
     });
 
     test('can track file sync state', () => {

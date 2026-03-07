@@ -10,21 +10,19 @@ import { FileIndex } from '../src/db/index.js';
 
 const TEST_DB_PATH = '/tmp/tas-test-tags.db';
 
+function cleanupDB(dbPath) {
+    const files = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`];
+    files.forEach(f => {
+        if (fs.existsSync(f)) fs.unlinkSync(f);
+    });
+}
+
 describe('Tags', () => {
     let db;
 
     beforeEach(() => {
         // Clean up any existing test database
-        if (fs.existsSync(TEST_DB_PATH)) {
-            fs.unlinkSync(TEST_DB_PATH);
-        }
-        // Also clean up WAL files
-        if (fs.existsSync(TEST_DB_PATH + '-wal')) {
-            fs.unlinkSync(TEST_DB_PATH + '-wal');
-        }
-        if (fs.existsSync(TEST_DB_PATH + '-shm')) {
-            fs.unlinkSync(TEST_DB_PATH + '-shm');
-        }
+        cleanupDB(TEST_DB_PATH);
 
         db = new FileIndex(TEST_DB_PATH);
         db.init();
@@ -45,15 +43,7 @@ describe('Tags', () => {
             db.close();
         }
         // Clean up test database
-        if (fs.existsSync(TEST_DB_PATH)) {
-            fs.unlinkSync(TEST_DB_PATH);
-        }
-        if (fs.existsSync(TEST_DB_PATH + '-wal')) {
-            fs.unlinkSync(TEST_DB_PATH + '-wal');
-        }
-        if (fs.existsSync(TEST_DB_PATH + '-shm')) {
-            fs.unlinkSync(TEST_DB_PATH + '-shm');
-        }
+        cleanupDB(TEST_DB_PATH);
     });
 
     test('can add tags to a file', () => {

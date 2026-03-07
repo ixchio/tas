@@ -1,6 +1,6 @@
 {
   "name": "@nightowne/tas-cli",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Telegram as Storage - Automated encrypted cloud backup. Free, encrypted, scriptable. Mount as folder or use with cron/Docker.",
   "type": "module",
   "main": "src/index.js",

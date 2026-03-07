@@ -6,6 +6,7 @@
 import TelegramBot from 'node-telegram-bot-api';
 import fs from 'fs';
 import path from 'path';
+import { pipeline } from 'stream/promises';
 
 export class TelegramClient {
     constructor(dataDir) {
@@ -18,8 +19,12 @@ export class TelegramClient {
      * Initialize with bot token
      * Get token from @BotFather on Telegram
      */
-    async initialize(token) {
-        this.bot = new TelegramBot(token, { polling: false });
+    async initialize(token, customApiUrl = null) {
+        const options = { polling: false };
+        if (customApiUrl) {
+            options.baseApiUrl = customApiUrl;
+        }
+        this.bot = new TelegramBot(token, options);
 
         // Verify the token works
         try {
@@ -75,30 +80,43 @@ export class TelegramClient {
      * Send a file to the storage chat
      * Telegram supports up to 2GB for documents!
      */
-    async sendFile(filePath, caption = '') {
+    async sendFile(filePath, caption = '', options = {}) {
         if (!this.chatId) {
             throw new Error('Chat ID not set. Run init first.');
         }
 
-        const fileStream = fs.createReadStream(filePath);
-        const filename = path.basename(filePath);
+        if (!fs.existsSync(filePath)) {
+            throw new Error(`File not found: ${filePath}`);
+        }
 
-        const message = await this.bot.sendDocument(this.chatId, fileStream, {
-            caption: caption
-        }, {
-            filename: filename,
-            contentType: 'application/octet-stream'
-        });
+        try {
+            let fileStream = fs.createReadStream(filePath);
+            const filename = path.basename(filePath);
 
-        return {
-            messageId: message.message_id,
-            fileId: message.document.file_id,
-            timestamp: message.date
-        };
+            if (options.limitRate) {
+                const { Throttle } = await import('../utils/throttle.js');
+                fileStream = fileStream.pipe(new Throttle(options.limitRate));
+            }
+
+            const message = await this.bot.sendDocument(this.chatId, fileStream, {
+                caption: caption
+            }, {
+                filename: filename,
+                contentType: 'application/octet-stream'
+            });
+
+            return {
+                messageId: message.message_id,
+                fileId: message.document.file_id,
+                timestamp: message.date
+            };
+        } catch (err) {
+            throw new Error(`Failed to upload to Telegram: ${err.message}`);
+        }
     }
 
     /**
-     * Download a file from Telegram
+     * Download a file from Telegram (In-Memory buffer)
      */
     async downloadFile(fileId) {
         // Get file path from Telegram servers
@@ -114,6 +132,16 @@ export class TelegramClient {
         }
 
         return Buffer.concat(chunks);
+    }
+
+    /**
+     * Efficiently download a file from Telegram straight to disk
+     */
+    async downloadFileToPath(fileId, destPath) {
+        const fileStream = await this.bot.getFileStream(fileId);
+        const writeStream = fs.createWriteStream(destPath);
+        await pipeline(fileStream, writeStream);
+        return destPath;
     }
 
     /**

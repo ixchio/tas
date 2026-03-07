@@ -29,6 +29,7 @@ export class SyncEngine extends EventEmitter {
         this.dataDir = options.dataDir;
         this.password = options.password;
         this.config = options.config;
+        this.limitRate = options.limitRate || null;
         this.watchers = new Map(); // path -> FSWatcher
         this.pendingChanges = new Map(); // path -> timeout
         this.db = null;
@@ -98,52 +99,69 @@ export class SyncEngine extends EventEmitter {
         let uploaded = 0;
         let skipped = 0;
 
-        for (const file of files) {
-            const existing = stateMap.get(file.relativePath);
+        // Process files with concurrency limit
+        const CONCURRENCY = 4;
+        const queue = [...files];
+        const promises = [];
 
-            // Check if file has changed (by mtime)
-            if (existing && existing.mtime >= file.mtime) {
-                skipped++;
-                continue;
-            }
+        const worker = async () => {
+            while (queue.length > 0) {
+                const file = queue.shift();
+                const existing = stateMap.get(file.relativePath);
 
-            // Calculate hash to detect actual changes
-            const hash = await hashFile(file.path);
+                // Check if file has changed (by mtime)
+                if (existing && existing.mtime >= file.mtime) {
+                    skipped++;
+                    continue;
+                }
 
-            if (existing && existing.file_hash === hash) {
-                // File unchanged, just update mtime
-                this.db.updateSyncState(folder.id, file.relativePath, hash, file.mtime);
-                skipped++;
-                continue;
-            }
+                // Calculate hash to detect actual changes
+                const hash = await hashFile(file.path);
 
-            // File is new or changed - upload it
-            try {
-                this.emit('file-upload-start', { file: file.relativePath });
-
-                await processFile(file.path, {
-                    password: this.password,
-                    dataDir: this.dataDir,
-                    customName: file.relativePath, // Use relative path as name
-                    config: this.config,
-                    onProgress: (msg) => this.emit('progress', { file: file.relativePath, message: msg })
-                });
-
-                // Update sync state
-                this.db.updateSyncState(folder.id, file.relativePath, hash, file.mtime);
-                uploaded++;
-
-                this.emit('file-upload-complete', { file: file.relativePath });
-            } catch (err) {
-                // File might already exist, skip
-                if (err.message.includes('duplicate')) {
+                if (existing && existing.file_hash === hash) {
+                    // File unchanged, just update mtime
                     this.db.updateSyncState(folder.id, file.relativePath, hash, file.mtime);
                     skipped++;
-                } else {
-                    this.emit('file-upload-error', { file: file.relativePath, error: err.message });
+                    continue;
+                }
+
+                // File is new or changed - upload it
+                try {
+                    this.emit('file-upload-start', { file: file.relativePath });
+
+                    await processFile(file.path, {
+                        password: this.password,
+                        dataDir: this.dataDir,
+                        customName: file.relativePath, // Use relative path as name
+                        config: this.config,
+                        limitRate: this.limitRate ? Math.floor(this.limitRate / CONCURRENCY) : null,
+                        onProgress: (msg) => this.emit('progress', { file: file.relativePath, message: msg })
+                    });
+
+                    // Update sync state
+                    this.db.updateSyncState(folder.id, file.relativePath, hash, file.mtime);
+                    uploaded++;
+
+                    this.emit('file-upload-complete', { file: file.relativePath });
+                } catch (err) {
+                    // File might already exist, skip
+                    if (err.message.includes('duplicate')) {
+                        this.db.updateSyncState(folder.id, file.relativePath, hash, file.mtime);
+                        skipped++;
+                    } else {
+                        // Sleep briefly on non-duplicate error (potential rate limits)
+                        await new Promise(r => setTimeout(r, 2000));
+                        this.emit('file-upload-error', { file: file.relativePath, error: err.message });
+                    }
                 }
             }
+        };
+
+        for (let i = 0; i < CONCURRENCY; i++) {
+            promises.push(worker());
         }
+
+        await Promise.all(promises);
 
         this.emit('sync-complete', { folder: folderPath, uploaded, skipped });
 
@@ -206,6 +224,7 @@ export class SyncEngine extends EventEmitter {
                 dataDir: this.dataDir,
                 customName: filename,
                 config: this.config,
+                limitRate: this.limitRate,
                 onProgress: (msg) => this.emit('progress', { file: filename, message: msg })
             });
 
