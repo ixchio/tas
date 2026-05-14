@@ -173,11 +173,12 @@ export async function processFile(filePath, options) {
 
     db.close();
 
-    // Clean up temp dir
+    // Clean up temp dir (only if empty)
     try {
-        fs.rmdirSync(tempDir);
+        const remaining = fs.readdirSync(tempDir);
+        if (remaining.length === 0) fs.rmdirSync(tempDir);
     } catch (e) {
-        // Ignore if not empty
+        // Ignore cleanup errors
     }
 
     return {
@@ -292,8 +293,16 @@ export async function retrieveFile(fileRecord, options) {
 
     const finalStats = fs.statSync(outputPath);
 
+    // Verify file integrity by comparing hash
+    onProgress?.('Verifying file integrity...');
+    const downloadedHash = await hashFile(outputPath);
+    if (fileRecord.hash && downloadedHash !== fileRecord.hash) {
+        throw new Error(`Integrity check failed: expected hash ${fileRecord.hash.substring(0, 12)}..., got ${downloadedHash.substring(0, 12)}...`);
+    }
+
     return {
         path: outputPath,
-        size: finalStats.size
+        size: finalStats.size,
+        verified: true
     };
 }

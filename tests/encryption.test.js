@@ -11,7 +11,7 @@ describe('Encryptor', () => {
         const password = 'test-password-123';
         const encryptor = new Encryptor(password);
 
-        const original = Buffer.from('Hello, WhatsApp Storage!');
+        const original = Buffer.from('Hello, Telegram Storage!');
         const encrypted = encryptor.encrypt(original);
         const decrypted = encryptor.decrypt(encrypted);
 

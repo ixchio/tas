@@ -1,6 +1,7 @@
 /**
  * Telegram Bot client wrapper
  * Uses official Telegram Bot API - 2GB file limit, FREE, no ban risk!
+ * Includes exponential backoff retry and rate limiting for production reliability.
  */
 
 import TelegramBot from 'node-telegram-bot-api';
@@ -8,11 +9,46 @@ import fs from 'fs';
 import path from 'path';
 import { pipeline } from 'stream/promises';
 
+const MAX_RETRIES = 5;
+const BASE_DELAY_MS = 1000;
+const MAX_DELAY_MS = 60000;
+
+/**
+ * Retry an async function with exponential backoff + jitter.
+ * Handles Telegram 429 (rate limit) errors by respecting retry_after.
+ */
+async function withRetry(fn, label = 'operation', retries = MAX_RETRIES) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+            return await fn();
+        } catch (err) {
+            const isRateLimit = err?.response?.statusCode === 429 || err?.message?.includes('429');
+            const isTransient = err?.code === 'ETIMEOUT' || err?.code === 'ECONNRESET' ||
+                err?.code === 'ENOTFOUND' || err?.message?.includes('ETIMEDOUT');
+
+            if (attempt >= retries) throw err;
+            if (!isRateLimit && !isTransient) throw err;
+
+            let delay;
+            if (isRateLimit && err?.response?.body?.parameters?.retry_after) {
+                delay = err.response.body.parameters.retry_after * 1000 + 500;
+            } else {
+                delay = Math.min(BASE_DELAY_MS * Math.pow(2, attempt) + Math.random() * 1000, MAX_DELAY_MS);
+            }
+
+            const sec = (delay / 1000).toFixed(1);
+            console.log(`⏳ ${label} failed (attempt ${attempt + 1}/${retries + 1}), retrying in ${sec}s...`);
+            await new Promise(r => setTimeout(r, delay));
+        }
+    }
+}
+
 export class TelegramClient {
     constructor(dataDir) {
         this.dataDir = dataDir;
         this.bot = null;
         this.chatId = null;
+        this._lastSendTime = 0;
     }
 
     /**
@@ -77,8 +113,21 @@ export class TelegramClient {
     }
 
     /**
+     * Rate-limit: ensure at least 1s between sends to same chat (Telegram limit)
+     */
+    async _rateLimit() {
+        const now = Date.now();
+        const elapsed = now - this._lastSendTime;
+        if (elapsed < 1000) {
+            await new Promise(r => setTimeout(r, 1000 - elapsed));
+        }
+        this._lastSendTime = Date.now();
+    }
+
+    /**
      * Send a file to the storage chat
      * Telegram supports up to 2GB for documents!
+     * Includes automatic retry with exponential backoff.
      */
     async sendFile(filePath, caption = '', options = {}) {
         if (!this.chatId) {
@@ -89,9 +138,12 @@ export class TelegramClient {
             throw new Error(`File not found: ${filePath}`);
         }
 
-        try {
+        const filename = path.basename(filePath);
+
+        return withRetry(async () => {
+            await this._rateLimit();
+
             let fileStream = fs.createReadStream(filePath);
-            const filename = path.basename(filePath);
 
             if (options.limitRate) {
                 const { Throttle } = await import('../utils/throttle.js');
@@ -110,28 +162,24 @@ export class TelegramClient {
                 fileId: message.document.file_id,
                 timestamp: message.date
             };
-        } catch (err) {
-            throw new Error(`Failed to upload to Telegram: ${err.message}`);
-        }
+        }, `Upload ${filename}`);
     }
 
     /**
      * Download a file from Telegram (In-Memory buffer)
+     * Includes automatic retry with exponential backoff.
      */
     async downloadFile(fileId) {
-        // Get file path from Telegram servers
-        const file = await this.bot.getFile(fileId);
+        return withRetry(async () => {
+            const fileStream = await this.bot.getFileStream(fileId);
 
-        // Download the file
-        const fileStream = await this.bot.getFileStream(fileId);
+            const chunks = [];
+            for await (const chunk of fileStream) {
+                chunks.push(chunk);
+            }
 
-        // Collect chunks into buffer
-        const chunks = [];
-        for await (const chunk of fileStream) {
-            chunks.push(chunk);
-        }
-
-        return Buffer.concat(chunks);
+            return Buffer.concat(chunks);
+        }, `Download ${fileId.substring(0, 12)}...`);
     }
 
     /**

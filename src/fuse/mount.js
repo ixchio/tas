@@ -17,6 +17,7 @@ import { createHeader, parseHeader, HEADER_SIZE } from '../utils/chunker.js';
 // File cache for performance (avoid re-downloading)
 const fileCache = new Map();
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const CACHE_MAX_ENTRIES = 100; // Prevent unbounded memory growth
 
 export class TelegramFS {
     constructor(options) {
@@ -504,6 +505,23 @@ export class TelegramFS {
     }
 
     setCache(filename, cachePath) {
+        // Evict oldest entry if cache is full
+        if (fileCache.size >= CACHE_MAX_ENTRIES) {
+            let oldestKey = null;
+            let oldestTime = Infinity;
+            for (const [key, entry] of fileCache) {
+                if (entry.timestamp < oldestTime) {
+                    oldestTime = entry.timestamp;
+                    oldestKey = key;
+                }
+            }
+            if (oldestKey) {
+                const evicted = fileCache.get(oldestKey);
+                try { if (fs.existsSync(evicted.path)) fs.unlinkSync(evicted.path); } catch (e) { }
+                fileCache.delete(oldestKey);
+            }
+        }
+
         fileCache.set(filename, {
             path: cachePath,
             timestamp: Date.now()

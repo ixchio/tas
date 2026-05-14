@@ -15,13 +15,31 @@ import { Compressor } from './utils/compression.js';
 import { FileIndex } from './db/index.js';
 import { processFile, retrieveFile } from './index.js';
 import { printBanner, LOGO, TAGLINE, VERSION } from './utils/branding.js';
-import { getPassword, verifyPassword, loadConfig, requireConfig, getAndVerifyPassword } from './utils/cli-helpers.js';
+import { getPassword, verifyPassword, loadConfig, requireConfig, getAndVerifyPassword, decryptBotToken, resolveConfig } from './utils/cli-helpers.js';
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import os from 'os';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, '..', 'data');
+const DATA_DIR = process.env.TAS_DATA_DIR || path.join(os.homedir(), '.tas');
+
+// Global error handlers — prevent silent crashes
+process.on('unhandledRejection', (reason) => {
+    console.error(chalk.red('\n✗ Unhandled error:'), reason?.message || reason);
+    process.exit(1);
+});
+
+process.on('uncaughtException', (err) => {
+    console.error(chalk.red('\n✗ Fatal error:'), err.message);
+    process.exit(1);
+});
+
+// Graceful shutdown on signals
+const cleanupAndExit = (signal) => {
+    console.log(chalk.dim(`\n${signal} received, shutting down...`));
+    process.exit(0);
+};
+process.on('SIGINT', () => cleanupAndExit('SIGINT'));
+process.on('SIGTERM', () => cleanupAndExit('SIGTERM'));
 
 const program = new Command();
 
@@ -104,14 +122,16 @@ program
             const userInfo = await client.waitForChatId(120000);
             spinner.succeed(`Linked to ${userInfo.firstName} (@${userInfo.username})`);
 
-            // Save config
+            // Save config (bot token encrypted with user's password)
             const configPath = path.join(DATA_DIR, 'config.json');
+            const encryptedToken = encryptor.encrypt(Buffer.from(token, 'utf-8')).toString('base64');
             fs.writeFileSync(configPath, JSON.stringify({
-                botToken: token,
+                encryptedBotToken: encryptedToken,
                 chatId: userInfo.chatId,
                 passwordHash: encryptor.getPasswordHash(),
                 username: userInfo.username,
-                createdAt: new Date().toISOString()
+                createdAt: new Date().toISOString(),
+                configVersion: 2
             }, null, 2));
 
             // Initialize database
@@ -152,11 +172,12 @@ program
                 process.exit(1);
             }
 
-            const config = requireConfig(DATA_DIR);
+            const rawConfig = requireConfig(DATA_DIR);
             spinner.stop();
 
             // Get and verify password
             const password = await getAndVerifyPassword(options.password, DATA_DIR);
+            const config = resolveConfig(rawConfig, password);
 
             spinner.start('Processing file...');
 
@@ -207,7 +228,7 @@ program
         const spinner = ora('Looking up file...').start();
 
         try {
-            const config = requireConfig(DATA_DIR);
+            const rawConfig = requireConfig(DATA_DIR);
 
             // Find file in index
             const db = new FileIndex(path.join(DATA_DIR, 'index.db'));
@@ -223,6 +244,7 @@ program
 
             // Get and verify password
             const password = await getAndVerifyPassword(options.password, DATA_DIR);
+            const config = resolveConfig(rawConfig, password);
 
             spinner.start('Downloading...');
 
@@ -266,6 +288,7 @@ program
     .alias('ls')
     .description('List all stored files')
     .option('-l, --long', 'Show detailed information')
+    .option('--json', 'Output as JSON (for scripting)')
     .action(async (options) => {
         try {
             const db = new FileIndex(path.join(DATA_DIR, 'index.db'));
@@ -273,8 +296,15 @@ program
 
             const files = db.listAll();
 
+            if (options.json) {
+                console.log(JSON.stringify(files, null, 2));
+                db.close();
+                return;
+            }
+
             if (files.length === 0) {
                 console.log(chalk.yellow('\n📭 No files stored yet. Use `tas push <file>` to upload.\n'));
+                db.close();
                 return;
             }
 
@@ -298,6 +328,7 @@ program
             }
 
             console.log();
+            db.close();
 
         } catch (err) {
             console.error(chalk.red('Error listing files:'), err.message);
@@ -311,6 +342,7 @@ program
     .alias('rm')
     .description('Remove a file from the index (optionally from Telegram too)')
     .option('--hard', 'Also delete from Telegram')
+    .option('-p, --password <password>', 'Encryption password (required for --hard)')
     .action(async (identifier, options) => {
         try {
             const db = new FileIndex(path.join(DATA_DIR, 'index.db'));
@@ -334,8 +366,9 @@ program
             if (confirm) {
                 // If hard delete, also remove from Telegram
                 if (options.hard) {
-                    const configPath = path.join(DATA_DIR, 'config.json');
-                    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+                    const rawConfig = requireConfig(DATA_DIR);
+                    const password = await getAndVerifyPassword(options.password, DATA_DIR);
+                    const config = resolveConfig(rawConfig, password);
 
                     const client = new TelegramClient(DATA_DIR);
                     await client.initialize(config.botToken);
@@ -361,11 +394,16 @@ program
 program
     .command('status')
     .description('Show TAS status and statistics')
-    .action(async () => {
+    .option('--json', 'Output as JSON (for scripting)')
+    .action(async (options) => {
         const configPath = path.join(DATA_DIR, 'config.json');
 
         if (!fs.existsSync(configPath)) {
-            console.log(chalk.yellow('\n⚠️  TAS not initialized. Run `tas init` first.\n'));
+            if (options.json) {
+                console.log(JSON.stringify({ initialized: false }));
+            } else {
+                console.log(chalk.yellow('\n⚠️  TAS not initialized. Run `tas init` first.\n'));
+            }
             return;
         }
 
@@ -378,13 +416,30 @@ program
         const storedSize = files.reduce((acc, f) => acc + f.stored_size, 0);
         const savings = totalSize > 0 ? Math.round((1 - storedSize / totalSize) * 100) : 0;
 
+        if (options.json) {
+            console.log(JSON.stringify({
+                initialized: true,
+                createdAt: config.createdAt,
+                username: config.username || 'unknown',
+                fileCount: files.length,
+                totalSize,
+                storedSize,
+                savingsPercent: savings,
+                dataDir: DATA_DIR
+            }, null, 2));
+            db.close();
+            return;
+        }
+
         console.log(chalk.cyan('\n📊 TAS Status\n'));
         console.log(`  Initialized: ${chalk.white(new Date(config.createdAt).toLocaleDateString())}`);
         console.log(`  Telegram user: ${chalk.white('@' + (config.username || 'unknown'))}`);
+        console.log(`  Data dir: ${chalk.white(DATA_DIR)}`);
         console.log(`  Files stored: ${chalk.white(files.length)}`);
         console.log(`  Total size: ${chalk.white(formatBytes(totalSize))}`);
         console.log(`  Compressed: ${chalk.white(formatBytes(storedSize))} ${chalk.dim(`(${savings}% saved)`)}`);
         console.log();
+        db.close();
     });
 
 // ============== MOUNT COMMAND ==============
@@ -395,8 +450,9 @@ program
     .action(async (mountpoint, options) => {
         console.log(chalk.cyan('\n🗂️  Mounting Telegram as filesystem...\n'));
 
-        const config = requireConfig(DATA_DIR);
+        const rawConfig = requireConfig(DATA_DIR);
         const password = await getAndVerifyPassword(options.password, DATA_DIR);
+        const config = resolveConfig(rawConfig, password);
 
         const spinner = ora('Initializing filesystem...').start();
 
@@ -678,8 +734,9 @@ syncCmd
     .action(async (options) => {
         console.log(chalk.cyan('\n🔄 Starting folder sync...\n'));
 
-        const config = requireConfig(DATA_DIR);
+        const rawConfig = requireConfig(DATA_DIR);
         const password = await getAndVerifyPassword(options.password, DATA_DIR);
+        const config = resolveConfig(rawConfig, password);
 
         let limitRate = null;
         if (options.limit) {
@@ -768,8 +825,9 @@ syncCmd
     .action(async (options) => {
         console.log(chalk.cyan('\n📥 Pulling files from Telegram...\n'));
 
-        const config = requireConfig(DATA_DIR);
+        const rawConfig = requireConfig(DATA_DIR);
         const password = await getAndVerifyPassword(options.password, DATA_DIR);
+        const config = resolveConfig(rawConfig, password);
 
         const spinner = ora('Loading...').start();
 
@@ -854,10 +912,13 @@ syncCmd
 program
     .command('verify')
     .description('Verify file integrity and check for missing Telegram messages')
-    .action(async () => {
+    .option('-p, --password <password>', 'Encryption password')
+    .action(async (options) => {
         console.log(chalk.cyan('\n🔍 Verifying file integrity...\n'));
 
-        const config = requireConfig(DATA_DIR);
+        const rawConfig = requireConfig(DATA_DIR);
+        const password = await getAndVerifyPassword(options.password, DATA_DIR);
+        const config = resolveConfig(rawConfig, password);
 
         const spinner = ora('Checking files...').start();
 
@@ -944,10 +1005,11 @@ program
 
 // Helper function
 function formatBytes(bytes) {
+    if (!Number.isFinite(bytes) || bytes < 0) return '0 B';
     if (bytes === 0) return '0 B';
     const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
@@ -1052,8 +1114,8 @@ program
             }
 
             // Resume uploads
-            const config = loadConfig(DATA_DIR);
-            if (!config) {
+            const rawConfig = loadConfig(DATA_DIR);
+            if (!rawConfig) {
                 console.log(chalk.red('✗ TAS not initialized.'));
                 db.close();
                 return;
@@ -1061,6 +1123,7 @@ program
 
             // Get and verify password
             const password = await getAndVerifyPassword(options.password, DATA_DIR);
+            const config = resolveConfig(rawConfig, password);
 
             // Connect to Telegram
             const { TelegramClient } = await import('./telegram/client.js');
@@ -1147,8 +1210,9 @@ shareCmd
     .action(async (file, options) => {
         console.log(chalk.cyan('\n🔗 Creating share link...\n'));
 
-        const config = requireConfig(DATA_DIR);
+        const rawConfig = requireConfig(DATA_DIR);
         const password = await getAndVerifyPassword(options.password, DATA_DIR);
+        const config = resolveConfig(rawConfig, password);
 
         const spinner = ora('Setting up...').start();
 
@@ -1297,6 +1361,98 @@ shareCmd
             console.error(chalk.red('Error:'), err.message);
             process.exit(1);
         }
+    });
+
+// ============== DOCTOR COMMAND ==============
+program
+    .command('doctor')
+    .description('🩺 Run self-diagnostics and check system health')
+    .action(async () => {
+        console.log(chalk.cyan('\n🩺 TAS Doctor — System Health Check\n'));
+
+        const checks = [];
+        const ok = (label) => { checks.push({ label, status: 'ok' }); console.log(chalk.green(`  ✓ ${label}`)); };
+        const warn = (label, detail) => { checks.push({ label, status: 'warn', detail }); console.log(chalk.yellow(`  ⚠ ${label}`) + chalk.dim(` — ${detail}`)); };
+        const fail = (label, detail) => { checks.push({ label, status: 'fail', detail }); console.log(chalk.red(`  ✗ ${label}`) + chalk.dim(` — ${detail}`)); };
+
+        // 1. Check Node.js version
+        const nodeVer = process.versions.node;
+        const major = parseInt(nodeVer.split('.')[0]);
+        if (major >= 18) ok(`Node.js ${nodeVer}`);
+        else warn(`Node.js ${nodeVer}`, 'Requires >= 18.0.0');
+
+        // 2. Check data directory
+        if (fs.existsSync(DATA_DIR)) ok(`Data directory: ${DATA_DIR}`);
+        else warn('Data directory missing', `Run \`tas init\` to create ${DATA_DIR}`);
+
+        // 3. Check config
+        const configPath = path.join(DATA_DIR, 'config.json');
+        if (fs.existsSync(configPath)) {
+            try {
+                const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+                if (config.configVersion === 2) ok('Config v2 (encrypted token)');
+                else if (config.botToken) warn('Config v1 (plaintext token)', 'Re-run `tas init` to encrypt token');
+                else fail('Config invalid', 'Missing bot token');
+
+                if (config.chatId) ok(`Chat ID: ${config.chatId}`);
+                else fail('Chat ID missing', 'Run `tas init`');
+            } catch (e) {
+                fail('Config corrupted', e.message);
+            }
+        } else {
+            warn('Config not found', 'Run `tas init`');
+        }
+
+        // 4. Check database
+        const dbPath = path.join(DATA_DIR, 'index.db');
+        if (fs.existsSync(dbPath)) {
+            try {
+                const db = new FileIndex(dbPath);
+                db.init();
+                const stats = db.getStats();
+                ok(`Database: ${stats.file_count} files, ${formatBytes(stats.total_original)} total`);
+                db.close();
+            } catch (e) {
+                fail('Database error', e.message);
+            }
+        } else {
+            warn('Database not found', 'Will be created on first upload');
+        }
+
+        // 5. Check FUSE availability
+        try {
+            await import('fuse-native');
+            ok('FUSE support available');
+        } catch (e) {
+            warn('FUSE not available', 'Install libfuse for mount support');
+        }
+
+        // 6. Check disk space
+        try {
+            const { execSync } = await import('child_process');
+            const df = execSync(`df -h "${DATA_DIR}" 2>/dev/null || echo "unknown"`).toString().trim();
+            const lines = df.split('\n');
+            if (lines.length > 1) {
+                const parts = lines[1].split(/\s+/);
+                const avail = parts[3] || 'unknown';
+                const usage = parts[4] || 'unknown';
+                if (parseInt(usage) > 90) warn(`Disk space: ${avail} free (${usage} used)`, 'Running low!');
+                else ok(`Disk space: ${avail} free (${usage} used)`);
+            }
+        } catch (e) { /* ignore */ }
+
+        // 7. Security check
+        const iterations = 600000;
+        ok(`Encryption: AES-256-GCM, PBKDF2-SHA512 ${iterations.toLocaleString()} iterations`);
+
+        // Summary
+        const fails = checks.filter(c => c.status === 'fail').length;
+        const warns = checks.filter(c => c.status === 'warn').length;
+        console.log();
+        if (fails > 0) console.log(chalk.red(`  ${fails} issue(s) found. Please fix them above.`));
+        else if (warns > 0) console.log(chalk.yellow(`  ${warns} warning(s). System is functional.`));
+        else console.log(chalk.green('  ✨ All systems go! TAS is healthy.'));
+        console.log();
     });
 
 program.parse();

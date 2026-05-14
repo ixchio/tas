@@ -73,12 +73,16 @@ Spins up a local HTTP server. File is downloaded from Telegram, decrypted, and s
 | Component | Implementation |
 |-----------|----------------|
 | Cipher | AES-256-GCM |
-| Key derivation | PBKDF2-SHA512, 100k iterations |
+| Key derivation | PBKDF2-SHA512, **600k iterations** (OWASP 2025) |
 | Salt | 32 bytes, random per file |
 | IV | 12 bytes, random per file |
 | Auth tag | 16 bytes (integrity verification) |
+| Bot token | Encrypted at rest in config (AES-256-GCM) |
+| Password hash | PBKDF2-based verification (brute-force resistant) |
+| Download integrity | SHA-256 hash verified after every download |
+| Share server | XSS-safe HTML output, RFC 6266 Content-Disposition |
 
-Your password **never** leaves your machine. Telegram only sees encrypted blobs. Even if someone accesses your bot chat, they get meaningless data without your password.
+Your password **never** leaves your machine. Telegram only sees encrypted blobs. Even if someone accesses your bot chat, they get meaningless data without your password. Your bot token is encrypted in the config file — it can only be decrypted with your password.
 
 ## 📋 Full CLI Reference
 
@@ -87,12 +91,13 @@ Your password **never** leaves your machine. Telegram only sees encrypted blobs.
 tas init                    # Setup wizard
 tas push <file>             # Upload
 tas pull <file|hash>        # Download
-tas list [-l]               # List files
+tas list [-l] [--json]      # List files (--json for scripting)
 tas delete <file|hash>      # Delete
-tas status                  # Stats
+tas status [--json]         # Stats (--json for scripting)
 tas search <query>          # Search files
 tas resume                  # Resume interrupted uploads
-tas verify                  # Check integrity
+tas verify                  # Check integrity (verifies Telegram + hashes)
+tas doctor                  # 🩺 Self-diagnostics & health check
 
 # FUSE Mount
 tas mount <path>            # Mount as folder
@@ -115,6 +120,17 @@ tas tag remove <file> <tags...>
 tas tag list [tag]
 ```
 
+## 🔄 Reliability
+
+TAS is built for production use:
+
+- **Exponential backoff** — Automatic retry with jitter on Telegram API errors (429, timeouts)
+- **Rate limiting** — Respects Telegram's 1 msg/sec per-chat limit proactively
+- **Download integrity** — SHA-256 hash verified after every download
+- **Resume uploads** — Interrupted uploads can be resumed from where they left off
+- **Graceful shutdown** — SIGINT/SIGTERM handled cleanly, no data corruption
+- **Self-diagnostics** — `tas doctor` checks Node.js version, config, DB, disk space, FUSE
+
 ## 🤖 Automation
 
 ```bash
@@ -124,6 +140,13 @@ tas push file.pdf
 
 # Or inline
 tas push -p "password" file.pdf
+
+# JSON output for scripting
+tas list --json | jq '.[].filename'
+tas status --json
+
+# Custom data directory
+export TAS_DATA_DIR=/path/to/data
 ```
 
 Works with cron, GitHub Actions, Docker, or any CI/CD.

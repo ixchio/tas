@@ -39,14 +39,13 @@ export async function getPassword(passwordOption, allowCache = true) {
 }
 
 /**
- * Verify password against config
+ * Verify password against config (supports both legacy and new hash formats)
  * @param {string} password - Password to verify
  * @param {Object} config - Config object with passwordHash
  * @returns {boolean}
  */
 export function verifyPassword(password, config) {
-    const encryptor = new Encryptor(password);
-    return encryptor.getPasswordHash() === config.passwordHash;
+    return Encryptor.verifyPasswordHash(password, config.passwordHash);
 }
 
 /**
@@ -62,11 +61,13 @@ export function validateConfig(config) {
         return { valid: false, errors };
     }
 
-    if (!config.botToken || typeof config.botToken !== 'string') {
-        errors.push('Missing or invalid botToken');
+    // v2: encrypted token, v1: plaintext token
+    const hasToken = config.encryptedBotToken || config.botToken;
+    if (!hasToken) {
+        errors.push('Missing bot token (botToken or encryptedBotToken)');
     }
 
-    if (!config.botToken?.includes(':')) {
+    if (config.botToken && !config.botToken.includes(':')) {
         errors.push('Invalid bot token format (should contain :)');
     }
 
@@ -82,6 +83,29 @@ export function validateConfig(config) {
         valid: errors.length === 0,
         errors
     };
+}
+
+/**
+ * Decrypt bot token from config using password
+ * Supports both v1 (plaintext) and v2 (encrypted) configs
+ * @param {Object} config - Config object
+ * @param {string} password - User's password
+ * @returns {string} - Decrypted bot token
+ */
+export function decryptBotToken(config, password) {
+    // v1: plaintext token (backward compatibility)
+    if (config.botToken) {
+        return config.botToken;
+    }
+
+    // v2: encrypted token
+    if (config.encryptedBotToken) {
+        const encryptor = new Encryptor(password);
+        const encryptedBuffer = Buffer.from(config.encryptedBotToken, 'base64');
+        return encryptor.decrypt(encryptedBuffer).toString('utf-8');
+    }
+
+    throw new Error('No bot token found in config');
 }
 
 /**
@@ -142,4 +166,18 @@ export async function getAndVerifyPassword(passwordOption, dataDir) {
     }
 
     return password;
+}
+
+/**
+ * Resolve config by decrypting bot token if needed.
+ * Returns a config object with a guaranteed plaintext `botToken` field.
+ * @param {Object} config - Raw config from disk
+ * @param {string} password - Verified password
+ * @returns {Object} - Config with decrypted botToken
+ */
+export function resolveConfig(config, password) {
+    return {
+        ...config,
+        botToken: decryptBotToken(config, password)
+    };
 }

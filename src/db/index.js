@@ -171,25 +171,32 @@ export class FileIndex {
   }
 
   /**
-   * Find file by hash
+   * Escape SQL LIKE wildcard characters
    */
-  findByHash(hash) {
-    const stmt = this.db.prepare(`
-      SELECT * FROM files WHERE hash = ? OR hash LIKE ?
-    `);
-
-    return stmt.get(hash, hash + '%');
+  _escapeLike(str) {
+    return str.replace(/[%_\\]/g, '\\$&');
   }
 
   /**
-   * Find file by filename
+   * Find file by hash (exact match or prefix match)
+   */
+  findByHash(hash) {
+    const stmt = this.db.prepare(`
+      SELECT * FROM files WHERE hash = ? OR hash LIKE ? ESCAPE '\\'
+    `);
+
+    return stmt.get(hash, this._escapeLike(hash) + '%');
+  }
+
+  /**
+   * Find file by filename (exact match or substring match)
    */
   findByName(filename) {
     const stmt = this.db.prepare(`
-      SELECT * FROM files WHERE filename = ? OR filename LIKE ?
+      SELECT * FROM files WHERE filename = ? OR filename LIKE ? ESCAPE '\\'
     `);
 
-    return stmt.get(filename, '%' + filename + '%');
+    return stmt.get(filename, '%' + this._escapeLike(filename) + '%');
   }
 
   /**
@@ -399,11 +406,11 @@ export class FileIndex {
       SELECT f.*, GROUP_CONCAT(t.tag) as tags
       FROM files f
       LEFT JOIN tags t ON f.id = t.file_id
-      WHERE f.filename LIKE ?
+      WHERE f.filename LIKE ? ESCAPE '\\'
       GROUP BY f.id
       ORDER BY f.created_at DESC
     `);
-    return stmt.all(`%${query}%`);
+    return stmt.all(`%${this._escapeLike(query)}%`);
   }
 
   /**
@@ -414,11 +421,11 @@ export class FileIndex {
       SELECT f.*, GROUP_CONCAT(t.tag) as tags
       FROM files f
       INNER JOIN tags t ON f.id = t.file_id
-      WHERE t.tag LIKE ?
+      WHERE t.tag LIKE ? ESCAPE '\\'
       GROUP BY f.id
       ORDER BY f.created_at DESC
     `);
-    return stmt.all(`%${query}%`);
+    return stmt.all(`%${this._escapeLike(query)}%`);
   }
 
   // ============== RESUME UPLOAD METHODS ==============
@@ -572,10 +579,9 @@ export class FileIndex {
    */
   cleanExpiredShares() {
     const stmt = this.db.prepare(`
-      DELETE FROM shares WHERE
-        REPLACE(REPLACE(expires_at, 'T', ' '), 'Z', '') < strftime('%Y-%m-%d %H:%M:%f', 'now')
+      DELETE FROM shares WHERE expires_at < ?
     `);
-    return stmt.run().changes;
+    return stmt.run(new Date().toISOString()).changes;
   }
 
   /**

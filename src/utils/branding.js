@@ -14,7 +14,7 @@ export const LOGO = `
 `;
 
 export const TAGLINE = 'Telegram as Storage';
-export const VERSION = '1.0.0';
+export const VERSION = '2.1.0';
 
 /**
  * Print the TAS banner
@@ -57,10 +57,10 @@ export function warn(msg) {
  * Format file size
  */
 export function formatSize(bytes) {
-    if (bytes === 0) return '0 B';
+    if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 

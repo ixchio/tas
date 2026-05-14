@@ -58,6 +58,25 @@ function formatTimeLeft(expiresAt) {
 }
 
 /**
+ * Escape HTML special characters to prevent XSS
+ */
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#x27;');
+}
+
+/**
+ * Sanitize filename for Content-Disposition header (RFC 6266)
+ */
+function sanitizeFilenameForHeader(filename) {
+    return filename.replace(/["\\\r\n]/g, '_');
+}
+
+/**
  * Generate the download HTML page
  */
 function generateDownloadPage(share, fileRecord) {
@@ -69,6 +88,7 @@ function generateDownloadPage(share, fileRecord) {
         : fileSize > 1024
             ? `${(fileSize / 1024).toFixed(1)} KB`
             : `${fileSize} B`;
+    const safeFilename = escapeHtml(fileRecord.filename);
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -146,7 +166,7 @@ function generateDownloadPage(share, fileRecord) {
     <div class="card">
         <div class="icon">🔐</div>
         <h1>Secure File Share</h1>
-        <div class="filename">${fileRecord.filename}</div>
+        <div class="filename">${safeFilename}</div>
         <div class="meta">
             <span>📦 ${sizeStr}</span>
             <span>⏳ ${timeLeft}</span>
@@ -378,11 +398,12 @@ export class ShareServer {
                 '.mp3': 'audio/mpeg'
             };
             const contentType = contentTypes[ext] || 'application/octet-stream';
+            const safeName = sanitizeFilenameForHeader(fileRecord.filename);
 
             res.writeHead(200, {
                 'Content-Type': contentType,
-                'Content-Disposition': `attachment; filename="${fileRecord.filename}"`,
-                'Content-Length': fileRecord.original_size
+                'Content-Disposition': `attachment; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(fileRecord.filename)}`,
+                'Transfer-Encoding': 'chunked'
             });
 
             // Download the file from Telegram, decrypt, decompress and stream directly to 'res'

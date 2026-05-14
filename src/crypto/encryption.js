@@ -10,7 +10,7 @@ const KEY_LENGTH = 32; // 256 bits
 const IV_LENGTH = 12;  // 96 bits for GCM
 const TAG_LENGTH = 16; // 128 bits auth tag
 const SALT_LENGTH = 32;
-const PBKDF2_ITERATIONS = 100000;
+const PBKDF2_ITERATIONS = 600000; // OWASP 2025 recommendation for SHA-512
 
 export class Encryptor {
     constructor(password) {
@@ -19,11 +19,29 @@ export class Encryptor {
 
     /**
      * Get a hash of the password for verification (not the actual key!)
+     * Uses PBKDF2 with a fixed salt derived from the password domain to make brute-force expensive.
      */
     getPasswordHash() {
-        return crypto.createHash('sha256')
-            .update(this.password + 'was-verify')
+        const verifySalt = Buffer.from('tas-password-verify-v2', 'utf-8');
+        return crypto.pbkdf2Sync(this.password, verifySalt, PBKDF2_ITERATIONS, 32, 'sha512').toString('hex');
+    }
+
+    /**
+     * Check password against a stored hash (supports both legacy SHA-256 and new PBKDF2 formats)
+     */
+    static verifyPasswordHash(password, storedHash) {
+        const encryptor = new Encryptor(password);
+
+        // Try new PBKDF2-based verification first
+        if (encryptor.getPasswordHash() === storedHash) {
+            return true;
+        }
+
+        // Fallback: legacy SHA-256 verification for backward compatibility
+        const legacyHash = crypto.createHash('sha256')
+            .update(password + 'was-verify')
             .digest('hex');
+        return legacyHash === storedHash;
     }
 
     /**

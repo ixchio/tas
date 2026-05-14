@@ -1,6 +1,6 @@
 /**
  * File chunking utilities for large files
- * WhatsApp document limit is ~2GB, we use 1.9GB chunks to be safe
+ * Telegram Bot API limit is 2GB, we use 1.9GB chunks to be safe
  */
 
 const MAX_CHUNK_SIZE = 1.9 * 1024 * 1024 * 1024; // 1.9 GB
