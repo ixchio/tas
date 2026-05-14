@@ -1,6 +1,6 @@
 {
   "name": "@nightowne/tas-cli",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Telegram as Storage - Automated encrypted cloud backup. Free, encrypted, scriptable. Mount as folder or use with cron/Docker.",
   "type": "module",
   "main": "src/index.js",
@@ -46,10 +46,12 @@
     "better-sqlite3": "^12.6.2",
     "chalk": "^5.3.0",
     "commander": "^12.1.0",
-    "fuse-native": "^2.2.6",
     "inquirer": "^12.2.0",
     "node-telegram-bot-api": "^0.66.0",
     "ora": "^8.1.1"
+  },
+  "optionalDependencies": {
+    "fuse-native": "^2.2.6"
   },
   "engines": {
     "node": ">=18.0.0"

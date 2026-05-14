@@ -8,7 +8,7 @@ import path from 'path';
 import { pipeline } from 'stream/promises';
 import { Encryptor, hashFile } from './crypto/encryption.js';
 import { Compressor } from './utils/compression.js';
-import { Chunker, createHeader, parseHeader, HEADER_SIZE } from './utils/chunker.js';
+import { createHeader, parseHeader, HEADER_SIZE } from './utils/chunker.js';
 import { TelegramClient } from './telegram/client.js';
 import { FileIndex } from './db/index.js';
 

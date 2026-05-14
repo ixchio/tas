@@ -1,9 +1,11 @@
 /**
  * File chunking utilities for large files
- * Telegram Bot API limit is 2GB, we use 1.9GB chunks to be safe
+ * Telegram Bot API limit is 50 MB for bot uploads (sendDocument).
+ * We use 49 MB to leave room for the 64-byte WAS1 header.
+ * See: https://core.telegram.org/bots/api#senddocument
  */
 
-const MAX_CHUNK_SIZE = 1.9 * 1024 * 1024 * 1024; // 1.9 GB
+const MAX_CHUNK_SIZE = 49 * 1024 * 1024; // 49 MB — Telegram Bot API safe limit
 
 export class Chunker {
     /**

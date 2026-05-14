@@ -5,9 +5,15 @@
  * This is the killer feature - use Telegram like a regular folder!
  */
 
-import Fuse from 'fuse-native';
 import path from 'path';
 import fs from 'fs';
+
+let Fuse;
+try {
+    Fuse = (await import('fuse-native')).default;
+} catch {
+    // fuse-native is optional — unavailable on ARM64 or systems without libfuse
+}
 import { TelegramClient } from '../telegram/client.js';
 import { Encryptor } from '../crypto/encryption.js';
 import { Compressor } from '../utils/compression.js';
@@ -21,6 +27,16 @@ const CACHE_MAX_ENTRIES = 100; // Prevent unbounded memory growth
 
 export class TelegramFS {
     constructor(options) {
+        if (!Fuse) {
+            throw new Error(
+                'fuse-native is not available on this system.\n' +
+                '  On Linux x86_64: npm install fuse-native && sudo apt install fuse libfuse-dev\n' +
+                '  On macOS: brew install macfuse && npm install fuse-native\n' +
+                '  On ARM64: see https://github.com/ixchio/tas/issues/1 for a workaround\n' +
+                '  All other TAS commands (push, pull, sync, share) work without FUSE.'
+            );
+        }
+
         this.dataDir = options.dataDir;
         this.password = options.password;
         this.config = options.config;
