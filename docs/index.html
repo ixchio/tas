@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TAS — Telegram as Storage</title>
+  <meta name="description" content="Free encrypted unlimited cloud storage inside Telegram. Zero-knowledge. Open source.">
+  <meta name="theme-color" content="#0a0a0a">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📦</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <!-- NAV -->
+  <nav>
+    <div class="nav-inner">
+      <a href="#" class="nav-brand">TAS</a>
+      <div class="nav-links">
+        <a href="#origin">Origin</a>
+        <a href="#how">How</a>
+        <a href="#features">Features</a>
+        <a href="#security">Security</a>
+        <a href="#install">Install</a>
+        <button class="theme-btn" onclick="Theme.toggle()">Dark</button>
+      </div>
+    </div>
+  </nav>
+
+
+  <!-- HERO -->
+  <section class="hero">
+    <div class="w">
+      <p class="hero-sub">Open source · MIT · v2.1.0</p>
+      <h1>Your files encrypted.<br>Stored in Telegram.<br>Free forever.</h1>
+      <p class="hero-lead">TAS turns a private Telegram bot chat into zero-knowledge cloud storage. AES-256-GCM encryption, FUSE mount, folder sync, expiring share links. One CLI. No accounts. No subscriptions.</p>
+      <div class="hero-actions">
+        <a href="https://github.com/ixchio/tas" class="btn-p">GitHub</a>
+        <a href="#install" class="btn-s">Get started</a>
+      </div>
+      <div class="install-cmd" onclick="copyInstall(this)">
+        <code>npm i -g @nightowne/tas-cli</code>
+        <span class="copy-hint">copy</span>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ORIGIN -->
+  <section id="origin">
+    <div class="w reveal">
+      <small>Origin</small>
+      <h2>This started with a spreadsheet I didn't want Google to read.</h2>
+      <div class="prose">
+        <p>I had a tax spreadsheet, a folder of scanned contracts, and a growing paranoia about what Google does with files sitting in Drive. They scan them. It's in the terms. They scan your documents to serve you better ads. That's the deal.</p>
+        <p>Dropbox wants twelve dollars a month. iCloud is fine if you live inside Apple's ecosystem and don't mind another monthly charge. Mega gives you 20 gigs for free with closed-source encryption — you're trusting a company in New Zealand that's been through multiple ownership changes to keep your files safe and honest.</p>
+        <p>I started thinking about where I could store encrypted files for free, with no cap, using infrastructure that already exists. And then it clicked: <strong>Telegram's Bot API lets you send documents up to 2 GB to a private chat with your own bot. There are no storage limits. No monthly fees. It just… works.</strong></p>
+        <p>So I wrote a CLI that compresses files, encrypts them locally with AES-256-GCM, splits them into 49 MB chunks, and uploads them to a Telegram bot chat. The bot never sees plaintext. Telegram never sees filenames. The password never leaves your machine.</p>
+        <p>That was the first version. Then I added FUSE mounting so you can drag files in like a regular folder. Then folder sync, so changes upload automatically. Then expiring share links with a download page. Then resume for interrupted uploads, integrity verification, JSON output for scripting, and a diagnostics command. It became a real tool.</p>
+        <p>I'm not pretending this replaces proper backups. Telegram is a messaging app, not a storage provider. They can delete messages. They can change their API. Use TAS alongside real backups, not instead of them. But for a personal encrypted vault that costs nothing and doesn't require trusting anyone with your data — it works remarkably well.</p>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- HOW IT WORKS -->
+  <section id="how">
+    <div class="w reveal">
+      <small>How it works</small>
+      <h2>Local encryption. Telegram transport. Nothing in between.</h2>
+      <div class="prose">
+        <p>Every file goes through the same pipeline before it touches the network.</p>
+      </div>
+
+      <div class="pipeline">
+        <div class="step"><span class="step-num">1</span><strong>Compress</strong><br>Gzip level 6. Skipped automatically for formats that don't benefit — mp4, zip, jpg, pdf, and about 30 others.</div>
+        <div class="step"><span class="step-num">2</span><strong>Encrypt</strong><br>AES-256-GCM with a key derived from your password via PBKDF2-SHA512 at 600,000 iterations. Random 32-byte salt and 12-byte IV per file.</div>
+        <div class="step"><span class="step-num">3</span><strong>Chunk</strong><br>Split into 49 MB pieces with a 64-byte WAS1 header containing size, chunk index, and flags. Telegram's Bot API limit is 50 MB.</div>
+        <div class="step"><span class="step-num">4</span><strong>Upload</strong><br>Sent to your private bot chat with rate limiting (1 msg/sec) and exponential backoff retry. If it fails, it retries. If the process dies, <code>tas resume</code> picks up where it stopped.</div>
+      </div>
+
+      <div class="prose" style="margin-top: 40px">
+        <p>Downloads reverse the process. After decryption and decompression, TAS compares the SHA-256 hash of the output against the original. If a single bit is wrong, it tells you.</p>
+      </div>
+
+      <div class="zk-box">
+        <p class="zk-label">What Telegram sees in your bot chat</p>
+        <code>a7f3b2c1e9d4.tas — 12.4 MB — application/octet-stream</code>
+        <p class="zk-note">No filename. No metadata. No content type. Encrypted noise.</p>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- FEATURES -->
+  <section id="features">
+    <div class="w reveal">
+      <small>Capabilities</small>
+      <h2>It does more than you'd expect from a CLI.</h2>
+
+      <div class="feat-list">
+        <div class="feat-item">
+          <h3>FUSE mount</h3>
+          <p>Run <code>tas mount ~/cloud</code> and Telegram storage appears as a regular folder. Open files in any app. Save directly. Unmount when you're done. Requires libfuse on Linux, macFUSE on macOS.</p>
+        </div>
+        <div class="feat-item">
+          <h3>Folder sync</h3>
+          <p>Register a directory with <code>tas sync add</code> and TAS watches for changes. New and modified files upload automatically with debouncing. Like Dropbox, except the backend is your Telegram bot.</p>
+        </div>
+        <div class="feat-item">
+          <h3>Expiring share links</h3>
+          <p>Generate a one-time download URL that expires after a set duration or download count. TAS spins up a local HTTP server and decrypts on-the-fly. The recipient gets the file. They never get your password.</p>
+        </div>
+        <div class="feat-item">
+          <h3>Tags and search</h3>
+          <p>Organize files with arbitrary tags. Search by name or tag with fuzzy matching. All metadata lives in a local SQLite database — fast, offline, and yours.</p>
+        </div>
+        <div class="feat-item">
+          <h3>Resume interrupted uploads</h3>
+          <p>Connection dropped at chunk 14 of 20? Run <code>tas resume</code>. TAS tracks which chunks uploaded successfully and picks up from chunk 15. Zero wasted bandwidth.</p>
+        </div>
+        <div class="feat-item">
+          <h3>JSON output</h3>
+          <p><code>tas list --json</code> and <code>tas status --json</code> output machine-readable data. Pipe to jq, parse in scripts, feed into dashboards. First-class automation support.</p>
+        </div>
+        <div class="feat-item">
+          <h3>Integrity verification</h3>
+          <p>Every download verifies the SHA-256 hash against the original. <code>tas verify</code> checks all stored files at once. If Telegram lost or corrupted a message, you'll know immediately.</p>
+        </div>
+        <div class="feat-item">
+          <h3>Self-diagnostics</h3>
+          <p><code>tas doctor</code> checks your Node.js version, config format, database health, disk space, FUSE availability, and encryption parameters. One command tells you if anything is wrong.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- SECURITY -->
+  <section id="security">
+    <div class="w reveal">
+      <small>Security</small>
+      <h2>Not "we take security seriously." Actual implementation details.</h2>
+      <div class="prose">
+        <p>The encryption is real, auditable, and open source. Here's exactly what happens to your data.</p>
+      </div>
+
+      <div class="sec-grid">
+        <div class="sec-item">
+          <div class="label">Cipher</div>
+          <div class="value">AES-256-GCM</div>
+          <div class="desc">Authenticated encryption. Any tampering is detected and rejected.</div>
+        </div>
+        <div class="sec-item">
+          <div class="label">Key derivation</div>
+          <div class="value">PBKDF2-SHA512 · 600,000 iterations</div>
+          <div class="desc">OWASP 2025 recommended minimum. Makes brute-force impractical.</div>
+        </div>
+        <div class="sec-item">
+          <div class="label">Salt</div>
+          <div class="value">32 bytes, cryptographically random</div>
+          <div class="desc">Unique per file. Precomputed tables are useless.</div>
+        </div>
+        <div class="sec-item">
+          <div class="label">IV / Nonce</div>
+          <div class="value">12 bytes, cryptographically random</div>
+          <div class="desc">Unique per file. Same plaintext produces different ciphertext.</div>
+        </div>
+        <div class="sec-item">
+          <div class="label">Config protection</div>
+          <div class="value">Bot token encrypted at rest</div>
+          <div class="desc">Your Telegram bot token is AES-256-GCM encrypted in config.json using your password.</div>
+        </div>
+        <div class="sec-item">
+          <div class="label">Password hash</div>
+          <div class="value">PBKDF2-based verification</div>
+          <div class="desc">No plaintext or fast-hash storage. Password verification is computationally expensive.</div>
+        </div>
+        <div class="sec-item">
+          <div class="label">Download integrity</div>
+          <div class="value">SHA-256 post-download</div>
+          <div class="desc">Every file hash-checked after decryption. Single bit flip = error.</div>
+        </div>
+        <div class="sec-item">
+          <div class="label">Share server</div>
+          <div class="value">XSS-safe output, RFC 6266 headers</div>
+          <div class="desc">HTML-escaped filenames. Proper Content-Disposition encoding. No injection vectors.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- LANDSCAPE -->
+  <section id="others">
+    <div class="w reveal">
+      <small>Landscape</small>
+      <h2>Other tools exist. TAS isn't the only way to do this.</h2>
+      <div class="prose">
+        <p><a href="https://github.com/divyam234/teldrive">TeleDrive</a> gives you a web UI for Telegram storage. Various Python scripts on GitHub do basic upload/download. <a href="https://rclone.org/">rclone</a> can mount Telegram as a backend with some configuration. <a href="https://restic.net/">restic</a> and <a href="https://www.borgbackup.org/">BorgBackup</a> are serious backup tools that TAS borrows reliability patterns from.</p>
+        <p>TAS is different because it's a purpose-built CLI for Telegram-as-storage with end-to-end encryption, FUSE mount, folder sync, share links, resume, and integrity verification in one package. It handles Telegram's API quirks — the 50 MB chunk limit, rate limiting, 429 retries — so you don't have to.</p>
+        <p>Where TAS falls short: no file versioning (yet), no web UI, no multi-user support, and the fundamental limitation that Telegram is a messaging platform that can delete your content. Google Drive and Dropbox have SLA-backed reliability. TAS doesn't. Be honest about your threat model.</p>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- INSTALL -->
+  <section id="install" class="sec-alt">
+    <div class="w reveal">
+      <small>Install</small>
+      <h2>Two minutes. Zero cost.</h2>
+      <pre><span class="c"># Install</span>
+npm install -g @nightowne/tas-cli
+
+<span class="c"># Setup wizard — creates a Telegram bot, sets your password, links your account</span>
+tas init
+
+<span class="c"># Upload</span>
+tas push document.pdf
+
+<span class="c"># Download (decrypts + verifies hash)</span>
+tas pull document.pdf
+
+<span class="c"># Mount as a folder</span>
+tas mount ~/cloud
+
+<span class="c"># Sync a directory</span>
+tas sync add ~/Documents && tas sync start
+
+<span class="c"># Share with an expiring link</span>
+tas share create document.pdf --expire 1h
+
+<span class="c"># Automation mode</span>
+export TAS_PASSWORD="your-password"
+tas list --json | jq '.[].filename'</pre>
+    </div>
+  </section>
+
+
+  <!-- FAQ -->
+  <section id="faq">
+    <div class="w reveal">
+      <small>FAQ</small>
+      <h2>Straight answers.</h2>
+      <div class="faq">
+        <details>
+          <summary>Is this actually free?</summary>
+          <p>Yes. TAS is MIT-licensed open source. It uses Telegram's Bot API, which is free with no storage limits. The catch: Telegram is a messaging app, not a storage provider. They could change their API or delete messages. Don't use TAS as your only backup.</p>
+        </details>
+        <details>
+          <summary>Can Telegram read my files?</summary>
+          <p>No. Everything is encrypted on your machine before upload. Telegram receives opaque binary blobs. Without your password, the data is indistinguishable from random noise.</p>
+        </details>
+        <details>
+          <summary>What if I forget my password?</summary>
+          <p>Your data is gone. Zero-knowledge means nobody — including you — can recover files without the password. Write it down somewhere safe.</p>
+        </details>
+        <details>
+          <summary>How big can files be?</summary>
+          <p>Unlimited in practice. Telegram supports 2 GB per document. TAS chunks files into 49 MB pieces and reassembles them transparently.</p>
+        </details>
+        <details>
+          <summary>Does this violate Telegram's ToS?</summary>
+          <p>No. TAS uses the official Bot API — the same API used by millions of bots. It sends documents to a private chat with your own bot. Nothing in Telegram's terms prohibits this.</p>
+        </details>
+        <details>
+          <summary>Why not restic or rclone?</summary>
+          <p>Great tools — TAS borrows patterns from both. But TAS is purpose-built for Telegram: it handles the 50 MB limit, Bot API rate limiting, and provides Telegram-specific features like share links. If you want cloud-agnostic backup, use restic.</p>
+        </details>
+        <details>
+          <summary>Windows support?</summary>
+          <p>CLI works everywhere Node.js runs, including Windows. FUSE mount is Linux/macOS only.</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- CTA -->
+  <section style="text-align: center;">
+    <div class="w reveal">
+      <h2>Your files. Your encryption. Your storage.</h2>
+      <p style="margin: 0 auto 32px; max-width: 480px;">No corporation reading your documents. No monthly invoice. Just a CLI and a Telegram bot.</p>
+      <div class="hero-actions">
+        <a href="https://github.com/ixchio/tas" class="btn-p">Star on GitHub</a>
+        <a href="https://www.npmjs.com/package/@nightowne/tas-cli" class="btn-s">npm</a>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- FOOTER -->
+  <footer>
+    <div class="w">
+      <p>MIT License · Built by <a href="https://github.com/ixchio">ixchio</a></p>
+    </div>
+  </footer>
+
+  <script src="js/main.js"></script>
+</body>
+</html>
