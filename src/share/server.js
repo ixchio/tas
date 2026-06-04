@@ -7,11 +7,12 @@
 import http from 'http';
 import crypto from 'crypto';
 import path from 'path';
+import { pipeline } from 'stream/promises';
 import { FileIndex } from '../db/index.js';
 import { TelegramClient } from '../telegram/client.js';
 import { Encryptor } from '../crypto/encryption.js';
 import { Compressor } from '../utils/compression.js';
-import { parseHeader, HEADER_SIZE } from '../utils/chunker.js';
+import { createDownloadPipeline } from '../utils/download-stream.js';
 
 /**
  * Generate a secure random share token
@@ -239,7 +240,7 @@ export class ShareServer {
         this.password = options.password;
         this.config = options.config;
         this.port = options.port || 3000;
-        this.host = options.host || '0.0.0.0';
+        this.host = options.host || '127.0.0.1';
 
         this.db = null;
         this.client = null;
@@ -265,59 +266,15 @@ export class ShareServer {
      */
     async streamToResponse(fileRecord, res) {
         const chunks = this.db.getChunks(fileRecord.id);
-        if (chunks.length === 0) throw new Error('No chunks found');
 
-        // Pre-sort chunks by index so we download them in correct order
-        chunks.sort((a, b) => a.chunk_index - b.chunk_index);
-
-        // Get total size from first chunk's header
-        const firstChunkData = await this.client.downloadFile(chunks[0].file_telegram_id);
-        const header = parseHeader(firstChunkData);
-        let wasCompressed = header.compressed;
-
-        // Prepare streams
-        const decryptStream = this.encryptor.getDecryptStream();
-        const decompressStream = this.compressor.getDecompressStream(wasCompressed);
-
-        // We need a Readable stream that will lazily fetch chunks from Telegram
-        const { Readable } = await import('stream');
-        const { pipeline } = await import('stream/promises');
-
-        const self = this;
-        let currentChunkIndex = 0;
-        let preloadedFirstChunk = firstChunkData;
-
-        const downloadStream = new Readable({
-            async read() {
-                try {
-                    if (currentChunkIndex >= chunks.length) {
-                        this.push(null); // End of stream
-                        return;
-                    }
-
-                    const chunk = chunks[currentChunkIndex];
-                    let data;
-
-                    if (currentChunkIndex === 0 && preloadedFirstChunk) {
-                        data = preloadedFirstChunk;
-                        preloadedFirstChunk = null;
-                    } else {
-                        data = await self.client.downloadFile(chunk.file_telegram_id);
-                    }
-
-                    // Strip header before pushing
-                    const payload = data.subarray(HEADER_SIZE);
-                    this.push(payload);
-
-                    currentChunkIndex++;
-                } catch (err) {
-                    this.destroy(err);
-                }
-            }
+        const { readable } = await createDownloadPipeline({
+            client: this.client,
+            chunks,
+            encryptor: this.encryptor,
+            compressor: this.compressor
         });
 
-        // Pipeline: Download from Telegram -> Decrypt -> Decompress -> HTTP Response
-        await pipeline(downloadStream, decryptStream, decompressStream, res);
+        await pipeline(readable, res);
     }
 
     /**

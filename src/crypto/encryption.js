@@ -28,12 +28,18 @@ export class Encryptor {
 
     /**
      * Check password against a stored hash (supports both legacy SHA-256 and new PBKDF2 formats)
+     * Uses timing-safe comparison to prevent side-channel attacks.
      */
     static verifyPasswordHash(password, storedHash) {
         const encryptor = new Encryptor(password);
 
+        const computedHash = encryptor.getPasswordHash();
+        const computedBuf = Buffer.from(computedHash, 'utf-8');
+        const storedBuf = Buffer.from(storedHash, 'utf-8');
+
         // Try new PBKDF2-based verification first
-        if (encryptor.getPasswordHash() === storedHash) {
+        if (computedBuf.length === storedBuf.length &&
+            crypto.timingSafeEqual(computedBuf, storedBuf)) {
             return true;
         }
 
@@ -41,7 +47,14 @@ export class Encryptor {
         const legacyHash = crypto.createHash('sha256')
             .update(password + 'was-verify')
             .digest('hex');
-        return legacyHash === storedHash;
+        const legacyBuf = Buffer.from(legacyHash, 'utf-8');
+
+        if (legacyBuf.length === storedBuf.length &&
+            crypto.timingSafeEqual(legacyBuf, storedBuf)) {
+            return true;
+        }
+
+        return false;
     }
 
     /**
@@ -110,6 +123,10 @@ export class Encryptor {
                 callback();
             },
             flush(callback) {
+                if (!headerWritten) {
+                    this.push(Buffer.concat([salt, iv]));
+                    headerWritten = true;
+                }
                 const final = cipher.final();
                 if (final.length > 0) {
                     this.push(final);

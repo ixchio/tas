@@ -7,6 +7,7 @@
 
 import path from 'path';
 import fs from 'fs';
+import { pipeline } from 'stream/promises';
 
 let Fuse;
 try {
@@ -18,7 +19,8 @@ import { TelegramClient } from '../telegram/client.js';
 import { Encryptor } from '../crypto/encryption.js';
 import { Compressor } from '../utils/compression.js';
 import { FileIndex } from '../db/index.js';
-import { createHeader, parseHeader, HEADER_SIZE } from '../utils/chunker.js';
+import { createHeader } from '../utils/chunker.js';
+import { createDownloadPipeline } from '../utils/download-stream.js';
 
 // File cache for performance (avoid re-downloading)
 const fileCache = new Map();
@@ -381,56 +383,18 @@ export class TelegramFS {
         }
 
         const chunks = this.db.getChunks(file.id);
-        if (chunks.length === 0) throw new Error('No chunks found');
 
-        // Pre-sort chunks
-        chunks.sort((a, b) => a.chunk_index - b.chunk_index);
-
-        const firstChunkData = await this.client.downloadFile(chunks[0].file_telegram_id);
-        const header = parseHeader(firstChunkData);
-        let wasCompressed = header.compressed;
-
-        const decryptStream = this.encryptor.getDecryptStream();
-        const decompressStream = this.compressor.getDecompressStream(wasCompressed);
-
-        const { Readable } = await import('stream');
-        const { pipeline } = await import('stream/promises');
-
-        const self = this;
-        let currentChunkIndex = 0;
-        let preloadedFirstChunk = firstChunkData;
-
-        const downloadStream = new Readable({
-            async read() {
-                try {
-                    if (currentChunkIndex >= chunks.length) {
-                        this.push(null);
-                        return;
-                    }
-
-                    const chunk = chunks[currentChunkIndex];
-                    let data;
-                    if (currentChunkIndex === 0 && preloadedFirstChunk) {
-                        data = preloadedFirstChunk;
-                        preloadedFirstChunk = null;
-                    } else {
-                        data = await self.client.downloadFile(chunk.file_telegram_id);
-                    }
-
-                    const payload = data.subarray(HEADER_SIZE);
-                    this.push(payload);
-                    currentChunkIndex++;
-                } catch (err) {
-                    this.destroy(err);
-                }
-            }
+        const { readable } = await createDownloadPipeline({
+            client: this.client,
+            chunks,
+            encryptor: this.encryptor,
+            compressor: this.compressor
         });
 
         const tmpOutputPath = outputPath + '.tmp';
         const writeStream = fs.createWriteStream(tmpOutputPath);
 
-        // Pipeline: Telegram -> Decrypt -> Decompress -> Disk Cache
-        await pipeline(downloadStream, decryptStream, decompressStream, writeStream);
+        await pipeline(readable, writeStream);
 
         // Rename to final atomic path
         fs.renameSync(tmpOutputPath, outputPath);

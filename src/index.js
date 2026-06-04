@@ -8,7 +8,7 @@ import path from 'path';
 import { pipeline } from 'stream/promises';
 import { Encryptor, hashFile } from './crypto/encryption.js';
 import { Compressor } from './utils/compression.js';
-import { createHeader, parseHeader, HEADER_SIZE } from './utils/chunker.js';
+import { createHeader, HEADER_SIZE } from './utils/chunker.js';
 import { TelegramClient } from './telegram/client.js';
 import { FileIndex } from './db/index.js';
 
@@ -210,86 +210,32 @@ export async function retrieveFile(fileRecord, options) {
         throw new Error('No chunk metadata found for this file');
     }
 
-    // Prepare components
-    const encryptor = new Encryptor(password);
-    const decryptStream = encryptor.getDecryptStream();
-
-    const tempDir = process.env.TAS_TMP_DIR || path.join(dataDir, 'tmp');
-    if (!fs.existsSync(tempDir)) {
-        fs.mkdirSync(tempDir, { recursive: true });
-    }
-
     // Connect to Telegram
     const client = new TelegramClient(dataDir);
     await client.initialize(config.botToken);
     client.setChatId(config.chatId);
 
-    // Get total size from first chunk's header, or from DB
-    const firstChunkData = await client.downloadFile(chunks[0].file_telegram_id);
-    const header = parseHeader(firstChunkData);
-
-    // Total original uncompressed size
-    let expectedOriginalSize = header.originalSize;
-    let wasCompressed = header.compressed;
-
+    const encryptor = new Encryptor(password);
     const compressor = new Compressor();
-    const decompressStream = compressor.getDecompressStream(wasCompressed);
 
-    // We need a Readable stream that will lazily fetch chunks from Telegram
-    // and push them into the decryption pipeline.
-    const { Readable } = await import('stream');
+    const { createDownloadPipeline } = await import('./utils/download-stream.js');
 
-    const totalBytes = fileRecord.stored_size || chunks.reduce((acc, c) => acc + (c.size || 0), 0);
-    let downloadedBytes = 0;
-
-    // Pre-sort chunks by index so we download them in correct order
-    chunks.sort((a, b) => a.chunk_index - b.chunk_index);
-
-    let currentChunkIndex = 0;
-
-    // We already downloaded the first chunk to inspect its header, we shouldn't discard it.
-    let preloadedFirstChunk = firstChunkData;
-
-    const downloadStream = new Readable({
-        async read() {
-            try {
-                if (currentChunkIndex >= chunks.length) {
-                    this.push(null); // End of stream
-                    return;
-                }
-
-                const chunk = chunks[currentChunkIndex];
-                onProgress?.(`Downloading chunk ${chunk.chunk_index + 1}/${chunks.length}...`);
-
-                let data;
-                if (currentChunkIndex === 0 && preloadedFirstChunk) {
-                    data = preloadedFirstChunk;
-                    preloadedFirstChunk = null;
-                } else {
-                    data = await client.downloadFile(chunk.file_telegram_id);
-                }
-
-                downloadedBytes += data.length;
-                onByteProgress?.({ downloaded: downloadedBytes, total: totalBytes, chunk: chunk.chunk_index + 1, totalChunks: chunks.length });
-
-                // Strip header before pushing
-                const payload = data.subarray(HEADER_SIZE);
-                this.push(payload);
-
-                currentChunkIndex++;
-            } catch (err) {
-                this.destroy(err);
-            }
+    const { readable } = await createDownloadPipeline({
+        client,
+        chunks,
+        encryptor,
+        compressor,
+        onChunkDownloaded({ chunkIndex, totalChunks, bytesDownloaded, totalBytes }) {
+            onProgress?.(`Downloading chunk ${chunkIndex + 1}/${totalChunks}...`);
+            onByteProgress?.({ downloaded: bytesDownloaded, total: totalBytes, chunk: chunkIndex + 1, totalChunks });
         }
     });
 
     const writeStream = fs.createWriteStream(outputPath);
-    const { pipeline } = await import('stream/promises');
 
     onProgress?.('Decrypting, decompressing, and writing file...');
 
-    // Pipeline: Download from Telegram -> Decrypt -> Decompress -> Disk
-    await pipeline(downloadStream, decryptStream, decompressStream, writeStream);
+    await pipeline(readable, writeStream);
 
     const finalStats = fs.statSync(outputPath);
 

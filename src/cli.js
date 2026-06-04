@@ -133,6 +133,8 @@ program
                 createdAt: new Date().toISOString(),
                 configVersion: 2
             }, null, 2));
+            // Restrict config file permissions — contains encrypted token and password hash
+            try { fs.chmodSync(configPath, 0o600); } catch { /* ignore on Windows */ }
 
             // Initialize database
             spinner.start('Initializing local index...');
