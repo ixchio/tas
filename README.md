@@ -198,9 +198,10 @@ TAS implements **zero-knowledge encryption** — we can't read your data, Telegr
 | **IV** | 12 bytes, cryptographically random | Unique per file — no pattern analysis |
 | **Auth Tag** | 16 bytes GCM authentication | Tamper detection — any bit flip = rejected |
 | **Bot Token** | Encrypted at rest (AES-256-GCM) | Even your config file is protected |
-| **Password Hash** | PBKDF2-based verification | Your password hash is computationally expensive to crack |
+| **Password Hash** | Timing-safe PBKDF2 verification | Resistant to timing side-channel attacks |
+| **Config Permissions** | `chmod 600` on config.json | Other users on your system can't read your credentials |
 | **Integrity** | SHA-256 verified on every download | Bit-perfect downloads, guaranteed |
-| **Share Server** | XSS-safe, RFC 6266 headers | Hardened against injection attacks |
+| **Share Server** | Localhost-only, XSS-safe, RFC 6266 | Binds to 127.0.0.1 by default — your LAN doesn't see it |
 
 ### What Telegram Sees
 
@@ -287,27 +288,28 @@ tas tag list [tag]          # List tags or files with a specific tag
 
 ```
 src/
-├── cli.js              # Commander-based CLI — all commands
-├── index.js            # Streaming upload/download pipeline
+├── cli.js                  # Commander-based CLI — all commands
+├── index.js                # Streaming upload/download pipeline
 ├── crypto/
-│   └── encryption.js   # AES-256-GCM + PBKDF2-SHA512 key derivation
+│   └── encryption.js       # AES-256-GCM + PBKDF2-SHA512 key derivation
 ├── db/
-│   └── index.js        # SQLite index (files, chunks, tags, shares, sync)
+│   └── index.js            # SQLite index (files, chunks, tags, shares, sync)
 ├── telegram/
-│   └── client.js       # Bot API wrapper — retry, rate-limit, streaming
+│   └── client.js           # Bot API wrapper — retry, rate-limit, streaming
 ├── fuse/
-│   └── mount.js        # FUSE filesystem — mount Telegram as a folder
+│   └── mount.js            # FUSE filesystem — mount Telegram as a folder
 ├── share/
-│   └── server.js       # HTTP server — expiring download links
+│   └── server.js           # HTTP server — expiring download links
 ├── sync/
-│   └── sync.js         # Folder watcher — Dropbox-style auto-sync
+│   └── sync.js             # Folder watcher — Dropbox-style auto-sync
 └── utils/
-    ├── compression.js   # Smart gzip (skips already-compressed formats)
-    ├── chunker.js       # 49MB chunking with custom WAS1 file headers
-    ├── progress.js      # Terminal progress bar with speed + ETA
-    ├── throttle.js      # Bandwidth limiter (stream transform)
-    ├── branding.js      # ASCII art + formatting
-    └── cli-helpers.js   # Password management + config resolution
+    ├── download-stream.js   # Shared Telegram→Decrypt→Decompress pipeline
+    ├── compression.js       # Smart gzip (skips already-compressed formats)
+    ├── chunker.js           # 49MB chunking with custom WAS1 file headers
+    ├── progress.js          # Terminal progress bar with speed + ETA
+    ├── throttle.js          # Bandwidth limiter (stream transform)
+    ├── branding.js          # ASCII art + formatting
+    └── cli-helpers.js       # Password management + config resolution
 ```
 
 **Tech stack:** Node.js · better-sqlite3 · node-telegram-bot-api · fuse-native · Commander · Chalk · Ora · Inquirer
@@ -331,7 +333,7 @@ src/
 ```bash
 git clone https://github.com/ixchio/tas
 cd tas && npm install
-npm test  # 43 tests, all passing
+npm test  # 71 tests, all passing
 ```
 
 PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.

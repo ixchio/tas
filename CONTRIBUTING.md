@@ -8,7 +8,7 @@ Thanks for your interest in contributing! Here's how you can help.
 git clone https://github.com/ixchio/tas
 cd tas
 npm install
-npm test  # 28 tests should pass
+npm test  # 71 tests should pass
 ```
 
 ## Ways to Contribute

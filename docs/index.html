@@ -33,7 +33,7 @@
   <!-- HERO -->
   <section class="hero">
     <div class="w">
-      <p class="hero-sub">Open source · MIT · v2.2.0</p>
+      <p class="hero-sub">Open source · MIT · v2.4.0</p>
       <h1>Your files encrypted.<br>Stored in Telegram.<br>Free forever.</h1>
       <p class="hero-lead">TAS turns a private Telegram bot chat into zero-knowledge cloud storage. AES-256-GCM encryption, FUSE mount, folder sync, expiring share links. One CLI. No accounts. No subscriptions.</p>
       <div class="hero-actions">
@@ -170,13 +170,13 @@
         </div>
         <div class="sec-item">
           <div class="label">Config protection</div>
-          <div class="value">Bot token encrypted at rest</div>
-          <div class="desc">Your Telegram bot token is AES-256-GCM encrypted in config.json using your password.</div>
+          <div class="value">Encrypted token + chmod 600</div>
+          <div class="desc">Bot token AES-256-GCM encrypted at rest. Config file restricted to owner-only access.</div>
         </div>
         <div class="sec-item">
           <div class="label">Password hash</div>
-          <div class="value">PBKDF2-based verification</div>
-          <div class="desc">No plaintext or fast-hash storage. Password verification is computationally expensive.</div>
+          <div class="value">Timing-safe PBKDF2 verification</div>
+          <div class="desc">Constant-time comparison prevents side-channel attacks. No plaintext or fast-hash storage.</div>
         </div>
         <div class="sec-item">
           <div class="label">Download integrity</div>
@@ -185,8 +185,8 @@
         </div>
         <div class="sec-item">
           <div class="label">Share server</div>
-          <div class="value">XSS-safe output, RFC 6266 headers</div>
-          <div class="desc">HTML-escaped filenames. Proper Content-Disposition encoding. No injection vectors.</div>
+          <div class="value">Localhost-only, XSS-safe, RFC 6266</div>
+          <div class="desc">Binds to 127.0.0.1 by default. HTML-escaped filenames. Proper headers. No injection vectors.</div>
         </div>
       </div>
     </div>
