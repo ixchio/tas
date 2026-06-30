@@ -2,7 +2,21 @@
 
 All notable changes to TAS (Telegram as Storage) will be documented in this file.
 
+## [2.4.1] - 2026-06-30
+
+### Security
+- **Upgrade `node-telegram-bot-api` 0.66.0 → 1.1.2** — eliminates 9 vulnerabilities (2 critical, 7 moderate) inherited from the legacy `request` dependency: `form-data` CRLF injection, `qs` DoS via memory exhaustion, `tough-cookie` prototype pollution, `uuid` buffer bounds bypass
+- **0 vulnerabilities** in full dependency tree after upgrade
+
+### Fixed
+- **Broken navigation anchor** — README `Security` nav link had incorrect URL-encoded variation selector (`#%EF%B8%8F-security-model`); corrected to `#-security-model` (matches GitHub's anchor generation algorithm)
+- **Missing `node_modules`** — `better-sqlite3` was not resolvable, causing `share`, `sync`, and `tags` test suites to fail with `ERR_MODULE_NOT_FOUND`
+
+### Tests
+- **71/71 passing** after all fixes (was 41/71 due to missing dependency)
+
 ## [2.4.0] - 2026-06-04
+
 
 ### Security
 - **Timing-safe password comparison** — `verifyPasswordHash` now uses `crypto.timingSafeEqual()` instead of `===` for both PBKDF2 and legacy SHA-256 paths, closing a timing side-channel

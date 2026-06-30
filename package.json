@@ -1,6 +1,6 @@
 {
   "name": "@nightowne/tas-cli",
-  "version": "2.4.0",
+  "version": "2.4.1",
   "description": "Turn Telegram into unlimited free cloud storage ($0/month forever) • AES-256-GCM encryption • FUSE mount • CLI-first • Zero-knowledge • No signup required",
   "type": "module",
   "main": "src/index.js",
