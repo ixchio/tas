@@ -1,232 +1,327 @@
 <p align="center">
-  <img src="assets/demo.gif" alt="TAS — Telegram as Storage" width="640">
+  <img src="assets/demo.gif" alt="TAS — Telegram as Storage CLI demo" width="680">
 </p>
 
-<h1 align="center">
-  📦 TAS — Telegram as Storage
-</h1>
+<h1 align="center">📦 TAS — Telegram as Storage</h1>
 
 <h3 align="center">
-  Turn Telegram into your personal encrypted cloud drive.<br>
-  Free forever. Zero-knowledge. No credit card. No limits.
+  Turn your Telegram bot into unlimited, encrypted cloud storage.<br>
+  <strong>Free forever. Zero-knowledge. No sign-up. No credit card. No limits.</strong>
 </h3>
 
 <p align="center">
-  <a href="https://github.com/ixchio/tas/actions/workflows/ci.yml"><img src="https://github.com/ixchio/tas/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://www.npmjs.com/package/@nightowne/tas-cli"><img src="https://img.shields.io/npm/v/@nightowne/tas-cli?color=cb3837&label=npm" alt="npm version"></a>
-  <a href="https://www.npmjs.com/package/@nightowne/tas-cli"><img src="https://img.shields.io/npm/dm/@nightowne/tas-cli?color=blue" alt="Downloads"></a>
-  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License: MIT"></a>
+  <a href="https://github.com/ixchio/tas/actions/workflows/ci.yml"><img src="https://github.com/ixchio/tas/actions/workflows/ci.yml/badge.svg" alt="CI Status"></a>
+  <a href="https://www.npmjs.com/package/@nightowne/tas-cli"><img src="https://img.shields.io/npm/v/@nightowne/tas-cli?color=cb3837&label=npm&logo=npm" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/@nightowne/tas-cli"><img src="https://img.shields.io/npm/dm/@nightowne/tas-cli?color=blue&label=downloads&logo=npm" alt="Monthly Downloads"></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-brightgreen.svg" alt="License: MIT"></a>
   <a href="https://github.com/ixchio/tas/stargazers"><img src="https://img.shields.io/github/stars/ixchio/tas?style=social" alt="GitHub Stars"></a>
+  <a href="https://github.com/ixchio/tas/network/members"><img src="https://img.shields.io/github/forks/ixchio/tas?style=social" alt="GitHub Forks"></a>
+  <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen?logo=node.js" alt="Node.js >= 18">
+  <img src="https://img.shields.io/badge/encryption-AES--256--GCM-blueviolet?logo=shield" alt="AES-256-GCM">
+  <img src="https://img.shields.io/badge/tests-71%20passing-success" alt="71 Tests Passing">
 </p>
 
 <p align="center">
-  <a href="#-quick-start">Quick Start</a> •
-  <a href="#-why-tas">Why TAS</a> •
-  <a href="#-features">Features</a> •
-  <a href="#%EF%B8%8F-security">Security</a> •
-  <a href="#-cli-reference">Docs</a> •
-  <a href="#-contributing">Contributing</a>
+  <a href="QUICKSTART.md"><strong>📚 Quick Start</strong></a> &nbsp;•&nbsp;
+  <a href="FAQ.md">FAQ</a> &nbsp;•&nbsp;
+  <a href="#-why-tas">Why TAS?</a> &nbsp;•&nbsp;
+  <a href="#-features">Features</a> &nbsp;•&nbsp;
+  <a href="#-security-model">Security</a> &nbsp;•&nbsp;
+  <a href="#-cli-reference">CLI Docs</a> &nbsp;•&nbsp;
+  <a href="#-docker--cicd">Docker / CI</a> &nbsp;•&nbsp;
+  <a href="CHANGELOG.md">Changelog</a>
 </p>
 
 ---
 
-<br>
+> **TL;DR** — One `npm install`, one `tas init`, then `tas push yourfile.pdf`. Your file is now AES-256 encrypted and stored for free on Telegram's infrastructure. No accounts, no fees, no vendor lock-in. Seriously.
 
-## The Problem
+---
 
-Google Drive scans your files. Dropbox costs $12/mo. iCloud locks you into Apple. Every "free" cloud storage either **reads your data**, **charges you money**, or **caps your storage**.
+## The Problem With "Free" Cloud Storage
 
-Meanwhile, Telegram gives every user **unlimited storage** with a bot API — and nobody's using it.
+Every major cloud provider has one of three business models: **scanning your data**, **charging you money**, or **capping your storage**. There is no free lunch.
+
+| Provider | Free Tier | Reads Your Data? | CLI-First? | Encryption At Rest (by you)? |
+|---|---|---|---|---|
+| Google Drive | 15 GB | ✅ Yes (indexes for ads) | ❌ | ❌ |
+| Dropbox | 2 GB | ✅ Can access | ❌ | ❌ |
+| iCloud | 5 GB | ✅ Apple ToS | ❌ | ❌ |
+| Mega | 20 GB | ❓ Closed-source E2EE | ❌ | ❓ |
+| Backblaze B2 | 10 GB | ❌ | ✅ | ❌ (you add it) |
+| **TAS + Telegram** | **♾️ Unlimited** | **❌ Impossible (AES-256)** | **✅ First-class** | **✅ Always** |
+
+Meanwhile, Telegram gives every bot **unlimited file storage** via its public Bot API — and almost nobody is using it.
+
+---
 
 ## The Solution
 
-**TAS** compresses, encrypts, and uploads your files to your own private Telegram bot chat. Your password never leaves your machine. Telegram only sees encrypted noise. You get a real CLI-powered cloud drive — with mount, sync, share, and search — for **$0/month, forever.**
+**TAS** compresses, encrypts (AES-256-GCM), chunks, and uploads your files to your own private Telegram bot chat. Your password never leaves your machine. Telegram only ever sees **encrypted noise**. You get a fully-featured, CLI-native cloud drive with FUSE mount, Dropbox-style sync, expiring share links, and tagging — at **$0/month, forever.**
 
 ```
-  Your Machine                          Telegram Cloud
-┌──────────────────┐               ┌──────────────────────┐
-│                  │   Compress    │                      │
-│   tas push       │──→ Encrypt ──→│  🔒 Encrypted Blobs  │
-│   tas mount      │──→ Chunk   ──→│  🔒 Private Bot Chat │
-│   tas sync       │               │  🔒 Your Data, Safe  │
-│                  │   Decrypt    │                      │
-│   tas pull       │←── Decomp ←──│  ← Download on demand│
-│                  │               │                      │
-└──────────────────┘               └──────────────────────┘
-     SQLite Index                     Unlimited & Free
+  Your Machine                                    Telegram Cloud
+┌─────────────────────────────┐               ┌──────────────────────────┐
+│                             │               │                          │
+│  tas push secret.tar.gz     │──→ gzip ──→   │   🔒 Encrypted Blob #1   │
+│  tas mount ~/cloud          │──→ AES-256 ──→│   🔒 Encrypted Blob #2   │
+│  tas sync start             │──→ chunk ──→  │   🔒 Encrypted Blob #3   │
+│                             │               │   (Private Bot Chat)     │
+│  tas pull secret.tar.gz     │←── decrypt ←──│                          │
+│  (SHA-256 verified)         │←── decomp  ←──│   ← Stream on demand     │
+│                             │               │                          │
+└─────────────────────────────┘               └──────────────────────────┘
+         SQLite Index                              Unlimited & Free
 ```
 
-<br>
+---
 
 ## ⚡ Quick Start
 
-Three commands. Two minutes. Zero cost.
+**Three commands. Under two minutes. Zero cost.**
 
 ```bash
+# 1. Install globally
 npm install -g @nightowne/tas-cli
 
-tas init              # Connect your Telegram bot (guided wizard)
-tas push secret.pdf   # Upload — encrypted, compressed, done
-tas pull secret.pdf   # Download — decrypted, verified, instant
+# 2. Connect your Telegram bot (guided wizard — takes ~60 seconds)
+tas init
+
+# 3. Start using it
+tas push secret.pdf          # Encrypt + compress + upload
+tas pull secret.pdf          # Download + decrypt + verify
+tas list                     # See everything you've stored
 ```
 
-That's it. You now have encrypted cloud storage.
+> **Need a Telegram bot?** Open Telegram → search `@BotFather` → `/newbot` → copy the token. That's it.
 
-<br>
+---
 
-## 💡 Why TAS
+## 💡 Why TAS?
 
 <table>
 <tr>
-<td width="50%">
+<td width="50%" valign="top">
 
-### vs. Google Drive
-- ❌ Google scans & indexes your files
-- ❌ 15 GB free tier
-- ❌ No encryption at rest (by you)
-
-### vs. Dropbox
-- ❌ $12/mo for 2 TB
-- ❌ Can access your data
-- ❌ No CLI-first experience
-
-### vs. Mega / pCloud
-- ❌ Freemium with tight caps
-- ❌ Closed source encryption
-- ❌ Can't self-host or script
+### ❌ The Alternative
+- Google Drive scans & indexes your files for ads
+- Dropbox costs $12/mo — and can read your data
+- iCloud locks you into the Apple ecosystem
+- Self-hosting (Nextcloud, MinIO) costs VPS money + maintenance time
+- S3 / B2 needs encryption wiring and costs per GB transferred
+- rclone + any backend still needs a paid backend
 
 </td>
-<td width="50%">
+<td width="50%" valign="top">
 
-### TAS gives you
-- ✅ **$0/month** — forever, no caps
-- ✅ **Zero-knowledge** — only you can decrypt
-- ✅ **AES-256-GCM** — military-grade encryption
-- ✅ **Mount as folder** — FUSE filesystem
-- ✅ **Auto-sync** — Dropbox-style folder sync
-- ✅ **Share links** — expiring, download-limited
-- ✅ **CLI-first** — cron, Docker, CI/CD ready
-- ✅ **Open source** — audit every line
+### ✅ TAS gives you
+- **$0/month** — forever, no storage caps, no bandwidth fees
+- **Zero-knowledge** — only you hold the decryption key
+- **AES-256-GCM** — same cipher used by banks and governments
+- **FUSE mount** — Telegram storage appears as a real folder
+- **Auto-sync** — Dropbox-style folder watcher built-in
+- **Expiring share links** — send files without sharing your password
+- **CLI-first** — pipe to `jq`, run in cron, automate everything
+- **Open source** — audit every single line of crypto code
 
 </td>
 </tr>
 </table>
 
-<br>
+---
 
 ## 🔥 Features
 
-### 🗂️ Mount as a Local Folder
-Drag and drop files into Telegram storage like it's a regular drive.
+### 🗂️ Mount as a Local Folder (FUSE)
+
+Use Telegram storage exactly like a USB drive — drag and drop, open in any app.
 
 ```bash
-tas mount ~/cloud        # Mount your Telegram storage
-# Now use Finder, Explorer, or any app — files sync to Telegram
-tas unmount ~/cloud
+tas mount ~/cloud            # Mount your Telegram storage as ~/cloud
+ls ~/cloud                   # Browse your encrypted files normally
+cp report.pdf ~/cloud/       # Drop files in — auto-encrypted and uploaded
+tas unmount ~/cloud          # Clean unmount when done
 ```
 
-> Requires `libfuse` — `apt install fuse libfuse-dev` on Linux, `brew install macfuse` on macOS.
+> **Requirements:** `apt install fuse libfuse-dev` (Linux) · `brew install macfuse` (macOS)
 
-### 🔄 Auto-Sync Folders
-Dropbox-style: register a folder, and TAS watches for changes and uploads automatically.
+---
+
+### 🔄 Auto-Sync Folders (Dropbox-style)
+
+Register a local folder and TAS watches it. Any new or changed file is automatically encrypted and uploaded.
 
 ```bash
-tas sync add ~/Documents    # Register a folder
-tas sync start              # Watch & auto-upload changes
-tas sync pull               # Download everything back
-tas sync status             # See what's synced
+tas sync add ~/Documents        # Register ~/Documents for auto-sync
+tas sync start                  # Start the watcher (runs in background)
+tas sync pull                   # Pull all synced files back down
+tas sync status                 # See what's queued / synced / pending
 ```
 
-### 🔗 Share with Expiring Links
-Generate one-time download links with a sleek dark-themed download page. Files are decrypted on-the-fly — the link holder never sees your password.
+---
+
+### 🔗 Expiring Share Links
+
+Generate time-limited, download-limited share links. Recipients get a clean dark-themed download page. **Your password is never shared — files are decrypted on-the-fly by the local server.**
 
 ```bash
-tas share create report.pdf --expire 1h --max-downloads 3
-# → http://localhost:3000/d/a1b2c3d4...
+tas share create report.pdf --expire 24h --max-downloads 5
+# → http://localhost:3000/d/a1b2c3d4e5f6...
 
-tas share list              # See active shares
-tas share revoke a1b2c3d4   # Revoke anytime
+tas share create backup.tar.gz --expire 1h --max-downloads 1  # Burn-after-read
+tas share list                  # See active links with expiry info
+tas share revoke a1b2c3d4       # Revoke instantly, anytime
 ```
 
-### 🏷️ Tags & Search
-Organize and find files instantly.
+---
+
+### 🏷️ Tags & Full-Text Search
 
 ```bash
-tas tag add report.pdf work Q4
-tas search "report"          # Search by filename
-tas search -t work           # Search by tag
+tas tag add report.pdf work Q4 finance
+tas tag add keys.env secrets production
+tas search "report"             # Search by filename pattern
+tas search -t work              # All files tagged "work"
+tas search -t secrets           # Quickly find your credentials
 ```
+
+---
 
 ### 🩺 Self-Diagnostics
-One command to check if everything is healthy.
 
 ```bash
 tas doctor
 # ✓ Node.js 20.11.0
-# ✓ Config v2 (encrypted token)
-# ✓ Database: 42 files, 1.3 GB total
+# ✓ Config v2 (encrypted bot token — AES-256-GCM at rest)
+# ✓ Database: 42 files, 1.3 GB total across 28 chunks
 # ✓ Disk space: 50 GB free (32% used)
-# ✓ Encryption: AES-256-GCM, PBKDF2-SHA512 600,000 iterations
+# ✓ Encryption: AES-256-GCM · PBKDF2-SHA512 · 600,000 iterations (OWASP 2025)
+# ✓ Telegram connectivity: OK
 # ✨ All systems go!
 ```
 
-### 🤖 Built for Automation
-First-class JSON output, environment variable support, and zero interactivity mode.
+---
+
+### 🤖 Built for Automation — CI/CD, Docker, Cron
+
+TAS is fully scriptable. No interactive prompts needed when `TAS_PASSWORD` is set.
 
 ```bash
-export TAS_PASSWORD="your-password"     # Skip prompts
-export TAS_DATA_DIR="/custom/path"      # Custom data location
+# Environment-based automation
+export TAS_PASSWORD="your-password"
+export TAS_DATA_DIR="/custom/path"
 
-tas push backup.tar.gz                  # Non-interactive upload
-tas list --json | jq '.[].filename'     # Pipe to jq
-tas status --json                       # Machine-readable status
+# Pipe to jq
+tas list --json | jq '.[].filename'
+tas list --json | jq '.[] | select(.size > 1000000)'  # Files > 1MB
 
-# Works with: cron • GitHub Actions • Docker • systemd • any CI/CD
+# GitHub Actions backup step
+tas push db-backup-$(date +%Y%m%d).sql.gz
+
+# cron: nightly backup at 2am
+0 2 * * * TAS_PASSWORD=$SECRET tas push /var/backups/db.tar.gz
+
+# JSON machine output everywhere
+tas status --json
+tas list --json
 ```
 
-<br>
+---
 
-## 🛡️ Security
+## 🐳 Docker & CI/CD
 
-TAS implements **zero-knowledge encryption** — we can't read your data, Telegram can't read your data, nobody can read your data without your password.
+```dockerfile
+FROM node:20-alpine
 
-| Layer | Implementation | Why It Matters |
-|-------|----------------|----------------|
-| **Cipher** | AES-256-GCM | Same cipher used by governments & banks |
-| **Key Derivation** | PBKDF2-SHA512, **600k iterations** | OWASP 2025 compliant — brute-force resistant |
-| **Salt** | 32 bytes, cryptographically random | Unique per file — no rainbow tables |
-| **IV** | 12 bytes, cryptographically random | Unique per file — no pattern analysis |
-| **Auth Tag** | 16 bytes GCM authentication | Tamper detection — any bit flip = rejected |
-| **Bot Token** | Encrypted at rest (AES-256-GCM) | Even your config file is protected |
-| **Password Hash** | Timing-safe PBKDF2 verification | Resistant to timing side-channel attacks |
-| **Config Permissions** | `chmod 600` on config.json | Other users on your system can't read your credentials |
-| **Integrity** | SHA-256 verified on every download | Bit-perfect downloads, guaranteed |
-| **Share Server** | Localhost-only, XSS-safe, RFC 6266 | Binds to 127.0.0.1 by default — your LAN doesn't see it |
+RUN npm install -g @nightowne/tas-cli
 
-### What Telegram Sees
+ENV TAS_PASSWORD=""
+ENV TAS_DATA_DIR="/data"
 
-```
-📦 a7f3b2c1e9d4.tas — 12.4 MB — application/octet-stream
+VOLUME ["/data"]
+
+CMD ["tas", "status"]
 ```
 
-That's it. An opaque encrypted blob. No filename, no content, no metadata. Just noise.
+```yaml
+# .github/workflows/backup.yml
+name: Nightly Backup
 
-<br>
+on:
+  schedule:
+    - cron: '0 2 * * *'
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install TAS
+        run: npm install -g @nightowne/tas-cli
+
+      - name: Push backup
+        env:
+          TAS_PASSWORD: ${{ secrets.TAS_PASSWORD }}
+          TAS_DATA_DIR: ${{ runner.temp }}/tas-data
+        run: |
+          tas init --token ${{ secrets.TELEGRAM_BOT_TOKEN }} --chat ${{ secrets.TELEGRAM_CHAT_ID }}
+          tar czf backup-$(date +%Y%m%d).tar.gz ./important-data/
+          tas push backup-$(date +%Y%m%d).tar.gz
+```
+
+---
+
+## 🛡️ Security Model
+
+TAS implements **zero-knowledge encryption** — we can't read your data, Telegram can't read your data, and nobody without your password ever can.
+
+| Layer | Implementation | Standard |
+|---|---|---|
+| **Cipher** | AES-256-GCM (authenticated encryption) | NIST FIPS 197 |
+| **Key Derivation** | PBKDF2-SHA512, **600,000 iterations** | OWASP 2025 |
+| **Salt** | 32 bytes, `crypto.randomBytes()` — unique per file | No rainbow tables |
+| **IV/Nonce** | 12 bytes, `crypto.randomBytes()` — unique per file | No nonce reuse |
+| **Auth Tag** | 16 bytes GCM tag — any tampered bit = instant rejection | Tamper detection |
+| **Bot Token** | Encrypted at rest in `config.json` (AES-256-GCM) | Config v2 |
+| **Password Verification** | `crypto.timingSafeEqual()` on both PBKDF2 and legacy paths | Timing-safe |
+| **Config Permissions** | `chmod 600 config.json` on creation | No world-readable secrets |
+| **Integrity** | SHA-256 hash verified on every single download | Bit-perfect guarantee |
+| **Share Server** | Binds `127.0.0.1` by default, XSS-escaped, RFC 6266 filenames | LAN-safe |
+
+### What Telegram Actually Sees
+
+```
+📦  a7f3b2c1e9d4f820.tas  —  12.4 MB  —  application/octet-stream
+```
+
+An opaque, encrypted blob. No filename. No content type. No metadata. Just noise.
+
+### Threat Model
+
+| Threat | Mitigated? | How |
+|---|---|---|
+| Telegram reads your files | ✅ Yes | AES-256-GCM — mathematically impossible without key |
+| Someone steals your config.json | ✅ Yes | Bot token encrypted at rest; password hash is PBKDF2 |
+| Brute-force your password | ✅ Yes | 600k PBKDF2 iterations ≈ 100ms/attempt minimum |
+| Tampered download | ✅ Yes | SHA-256 check + GCM auth tag on every download |
+| Timing attack on password | ✅ Yes | `crypto.timingSafeEqual()` on all comparisons |
+| Share link exposure | ✅ Yes | Localhost-only by default; expiry + download limits |
+
+---
 
 ## 🔄 Reliability
 
-Built like professional backup tools (inspired by restic, rclone, borg):
+Built with the same philosophy as professional backup tools (restic, borg, rclone):
 
-| Feature | Details |
-|---------|---------|
+| Feature | Implementation |
+|---|---|
 | **Exponential Backoff** | Auto-retry with jitter on Telegram 429 errors and network timeouts |
-| **Rate Limiting** | Built-in 1 msg/sec limiter — never hits Telegram's rate limits |
-| **Integrity Verification** | SHA-256 hash check after every single download |
-| **Resume Uploads** | Interrupted? Run `tas resume` to pick up where you left off |
-| **Graceful Shutdown** | SIGINT/SIGTERM handled cleanly — zero data corruption risk |
-| **Self-Diagnostics** | `tas doctor` validates your entire setup in seconds |
+| **Rate Limiting** | Built-in 1 msg/sec — never trips Telegram's rate limits |
+| **Integrity Verification** | SHA-256 hash verified after every single download |
+| **Resume Uploads** | `tas resume` picks up interrupted multi-chunk uploads |
+| **Graceful Shutdown** | SIGINT/SIGTERM handled — zero corruption risk on Ctrl-C |
+| **Self-Diagnostics** | `tas doctor` validates your entire setup end-to-end |
 
-<br>
+---
 
 ## 📋 CLI Reference
 
@@ -234,16 +329,16 @@ Built like professional backup tools (inspired by restic, rclone, borg):
 <summary><strong>Core Commands</strong></summary>
 
 ```bash
-tas init                    # 🚀 Interactive setup wizard
-tas push <file>             # ⬆️  Upload (encrypt + compress + upload)
-tas pull <file|hash>        # ⬇️  Download (download + decrypt + verify)
-tas list [-l] [--json]      # 📋 List all files
-tas delete <file|hash>      # 🗑️  Remove from index (--hard to delete from Telegram)
-tas status [--json]         # 📊 Storage stats
-tas search <query>          # 🔍 Find files by name or tag
-tas resume                  # 🔄 Resume interrupted uploads
-tas verify                  # ✅ Verify all files exist & are intact
-tas doctor                  # 🩺 System health check
+tas init                          # 🚀 Interactive setup wizard (create bot in ~60s)
+tas push <file> [file2...]        # ⬆️  Encrypt + compress + upload
+tas pull <file|hash>              # ⬇️  Download + decrypt + verify
+tas list [-l] [--json]            # 📋 List all stored files
+tas delete <file|hash>            # 🗑️  Remove from index (--hard removes from Telegram)
+tas status [--json]               # 📊 Storage stats & database health
+tas search <query> [-t tag]       # 🔍 Find by filename or tag
+tas resume                        # 🔄 Resume interrupted uploads
+tas verify                        # ✅ Verify every file still exists and is intact
+tas doctor                        # 🩺 Full system health check
 ```
 
 </details>
@@ -252,15 +347,15 @@ tas doctor                  # 🩺 System health check
 <summary><strong>Mount & Sync</strong></summary>
 
 ```bash
-# FUSE Mount (use Telegram like a local folder)
-tas mount <path>            # Mount
-tas unmount <path>          # Unmount
+# FUSE Mount
+tas mount <path>                  # Mount Telegram storage as a local folder
+tas unmount <path>                # Clean unmount
 
-# Folder Sync (Dropbox-style auto-upload)
-tas sync add <folder>       # Register a folder to sync
-tas sync start              # Start watching for changes
-tas sync pull               # Download all synced files
-tas sync status             # Show sync status
+# Dropbox-style Folder Sync
+tas sync add <folder>             # Register folder for auto-sync
+tas sync start                    # Start watching for changes
+tas sync pull                     # Download all synced files locally
+tas sync status                   # Show sync queue and status
 ```
 
 </details>
@@ -269,94 +364,158 @@ tas sync status             # Show sync status
 <summary><strong>Share & Tags</strong></summary>
 
 ```bash
-# Temporary Share Links
-tas share create <file> [--expire 24h] [--max-downloads 3]
-tas share list              # Active shares
-tas share revoke <token>    # Revoke a share link
+# Expiring Share Links
+tas share create <file> [--expire 1h|24h|7d] [--max-downloads N]
+tas share list                    # Active links with expiry countdown
+tas share revoke <token>          # Instantly revoke a share
 
-# File Tags
-tas tag add <file> <tags...>
-tas tag remove <file> <tags...>
-tas tag list [tag]          # List tags or files with a specific tag
+# File Tagging
+tas tag add <file> <tag> [tag2...]
+tas tag remove <file> <tag>
+tas tag list [tag]                # List all tags, or files with a specific tag
 ```
 
 </details>
 
-<br>
+<details>
+<summary><strong>Environment Variables</strong></summary>
+
+```bash
+TAS_PASSWORD="..."          # Skip password prompts (CI/CD, cron, Docker)
+TAS_DATA_DIR="/custom/path" # Override default ~/.tas data directory
+```
+
+</details>
+
+---
 
 ## 🏗️ Architecture
 
 ```
 src/
-├── cli.js                  # Commander-based CLI — all commands
-├── index.js                # Streaming upload/download pipeline
+├── cli.js                    # Commander-based CLI — all commands defined here
+├── index.js                  # Core streaming upload/download pipeline
 ├── crypto/
-│   └── encryption.js       # AES-256-GCM + PBKDF2-SHA512 key derivation
+│   └── encryption.js         # AES-256-GCM + PBKDF2-SHA512 (600k iterations)
 ├── db/
-│   └── index.js            # SQLite index (files, chunks, tags, shares, sync)
+│   └── index.js              # SQLite index: files, chunks, tags, shares, sync
 ├── telegram/
-│   └── client.js           # Bot API wrapper — retry, rate-limit, streaming
+│   └── client.js             # Bot API wrapper — retry, rate-limit, streaming
 ├── fuse/
-│   └── mount.js            # FUSE filesystem — mount Telegram as a folder
+│   └── mount.js              # FUSE filesystem — mount Telegram as a local folder
 ├── share/
-│   └── server.js           # HTTP server — expiring download links
+│   └── server.js             # HTTP server — expiring encrypted share links
 ├── sync/
-│   └── sync.js             # Folder watcher — Dropbox-style auto-sync
+│   └── sync.js               # fs.watch folder watcher — Dropbox-style auto-sync
 └── utils/
-    ├── download-stream.js   # Shared Telegram→Decrypt→Decompress pipeline
-    ├── compression.js       # Smart gzip (skips already-compressed formats)
-    ├── chunker.js           # 49MB chunking with custom WAS1 file headers
-    ├── progress.js          # Terminal progress bar with speed + ETA
-    ├── throttle.js          # Bandwidth limiter (stream transform)
-    ├── branding.js          # ASCII art + formatting
-    └── cli-helpers.js       # Password management + config resolution
+    ├── download-stream.js     # Shared Telegram→Decrypt→Decompress pipeline
+    ├── compression.js         # Smart gzip (skips already-compressed formats)
+    ├── chunker.js             # 49 MB chunks + WAS1 binary file headers
+    ├── progress.js            # Terminal progress bars with MB/s + ETA
+    ├── throttle.js            # Bandwidth limiter (stream transform)
+    ├── branding.js            # ASCII art + version display
+    └── cli-helpers.js         # Password management + config resolution
 ```
 
-**Tech stack:** Node.js · better-sqlite3 · node-telegram-bot-api · fuse-native · Commander · Chalk · Ora · Inquirer
+**Tech stack:** Node.js 18+ · better-sqlite3 · node-telegram-bot-api · fuse-native · Commander · Chalk · Ora · Inquirer
 
-<br>
+---
+
+## 💡 Perfect For
+
+| Use Case | Example |
+|---|---|
+| 📄 **Personal document vault** | Taxes, contracts, scans, receipts — encrypted |
+| 🔑 **Secrets & credentials** | `.env` files, SSH private keys, API tokens |
+| 🗝️ **Password manager sync** | KeePass `.kdbx`, 1Password vaults, Bitwarden exports |
+| 📦 **Code project backups** | Git bundles, build artifacts, config files |
+| 🎬 **Private media archive** | Photos, videos, music — encrypted & searchable |
+| 🔗 **Ephemeral file sharing** | Burn-after-read links with download limits |
+| 💾 **Offsite backup** | Nightly database dumps, system configs via cron |
+| 🤖 **CI/CD artifacts** | Store build outputs, test reports, deployment keys |
+
+**Not ideal for:** Mission-critical business data (use professional backup tools alongside this), team collaboration (no multi-user support yet), or replacing full backup systems — **Telegram can theoretically delete old messages.**
+
+---
+
+## ❓ Is This Allowed? (The Legal Question)
+
+### Will Telegram ban me?
+
+**No.** Here's the complete picture:
+
+- ✅ **Bot API is a public, documented feature** — Telegram designed file uploads into the Bot API intentionally
+- ✅ **You're sending to your own private bot chat** — not a public channel, not spamming
+- ✅ **Content is encrypted** — Telegram cannot detect what you're storing
+- ✅ **No published storage limits** — individual files cap at 2 GB (TAS chunks automatically)
+- ✅ **Strong precedent** — thousands of file-sharing bots, backup tools, and media archives use this API
+- ⚠️ **Worst case** — Telegram might prune old messages to free infrastructure space. They won't ban you for using a documented API
+
+**Your responsibility:** Don't store illegal content. Telegram's ToS prohibits copyright infringement, malware, CSAM, etc. Use responsibly. See [FAQ.md](FAQ.md) for the full legal breakdown.
+
+---
 
 ## ⚠️ Good to Know
 
 | | |
 |---|---|
-| 📌 **Not a backup solution** | Telegram can delete content. Use TAS alongside proper backups, not instead of them. |
-| 📌 **49 MB chunks** | Files are automatically split due to Telegram Bot API limits. Fully transparent. |
-| 📌 **Single-user** | Designed for personal use. Not multi-tenant. |
-| 📌 **FUSE = Linux/macOS** | Mount feature requires `libfuse`. CLI works everywhere Node.js runs. |
+| 📌 **Not a replacement for backups** | Telegram can purge old messages. Use TAS alongside, not instead of, real backup solutions. |
+| 📌 **49 MB chunk size** | Files are split automatically — fully transparent to you. Telegram's Bot API limit is 50 MB. |
+| 📌 **Single-user** | Designed for personal use. No multi-tenant or shared-account support. |
+| 📌 **FUSE = Linux/macOS only** | Mount requires `libfuse`. The CLI itself works anywhere Node.js 18+ runs. |
 | 📌 **No versioning (yet)** | Overwriting a file replaces the previous version. |
+| 📌 **Internet required** | Telegram-backed — offline access requires files pulled locally first. |
 
-<br>
+---
 
 ## 🛠️ Development
 
 ```bash
 git clone https://github.com/ixchio/tas
 cd tas && npm install
-npm test  # 71 tests, all passing
+
+npm test               # Run all 71 tests (encryption, WAS1 headers, tags, sync, shares)
+npm test -- --watch    # Watch mode for active development
 ```
 
-PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+**Test coverage:** streaming encrypt/decrypt roundtrips · cross-API compat (buffer↔stream) · small-chunk stress testing · truncation/corruption error paths · Unicode filename handling · WAS1 binary header parsing · timing-safe comparison paths
 
-<br>
+PRs welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+---
 
 ## 🌟 Contributing
 
-TAS is open source and we love contributions:
+TAS is open source and contributions are genuinely appreciated:
 
-- 🐛 **Found a bug?** [Open an issue](https://github.com/ixchio/tas/issues)
-- 💡 **Have an idea?** [Start a discussion](https://github.com/ixchio/tas/issues)
-- 🔧 **Want to contribute?** Fork → Branch → PR → 🎉
+- 🐛 **Found a bug?** [Open an issue](https://github.com/ixchio/tas/issues) — include `tas doctor` output
+- 💡 **Have a feature idea?** [Start a discussion](https://github.com/ixchio/tas/discussions)
+- 🔧 **Want to contribute code?** Fork → branch → PR → 🎉
+- ⭐ **Just want to help?** A GitHub star dramatically increases discoverability
 
-<br>
+---
 
 ## 📄 License
 
-MIT — use it, fork it, ship it, sell it. Do whatever you want.
+MIT — use it, fork it, ship it, sell it. Do whatever you want with it.
+
+---
+
+## Related Projects
+
+If TAS fits your workflow, you might also find these useful:
+
+- [rclone](https://github.com/rclone/rclone) — rsync for cloud storage (dozens of backends)
+- [restic](https://github.com/restic/restic) — encrypted, deduplicated backup program
+- [age](https://github.com/FiloSottile/age) — simple, modern file encryption tool
+- [magic-wormhole](https://github.com/magic-wormhole/magic-wormhole) — encrypted file transfer between machines
 
 ---
 
 <p align="center">
   <sub>Built with ☕ and stubbornness by <a href="https://github.com/ixchio">@ixchio</a></sub><br>
-  <sub>If TAS saved you money, consider giving it a ⭐</sub>
+  <sub>If TAS saved you money, a ⭐ on GitHub is the best way to say thanks — it helps others find the project.</sub><br><br>
+  <a href="https://github.com/ixchio/tas/stargazers">
+    <img src="https://img.shields.io/github/stars/ixchio/tas?style=for-the-badge&logo=github&label=Star%20TAS&color=ffd700" alt="Star TAS on GitHub">
+  </a>
 </p>
