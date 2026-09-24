@@ -2,6 +2,11 @@
 
 All notable changes to TAS (Telegram as Storage) will be documented in this file.
 
+## [3.0.2] - 2026-09-25
+
+### Fixed — Apple Silicon install recovery
+- **Optional native source recovery** — if the legacy optional addon fails before TAS can patch it on arm64, postinstall restores only its source without lifecycle scripts, then rebuilds it against the user's installed macFUSE library. Failed rebuilds still leave every non-mount TAS command usable.
+
 ## [3.0.1] - 2026-09-25
 
 ### Fixed — current macFUSE mount support (#4)

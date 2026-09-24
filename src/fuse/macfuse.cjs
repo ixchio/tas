@@ -84,6 +84,23 @@ function getDarwinLibraryDirectory (packageRoot) {
   }
 }
 
+function installOptionalFuseNative (packageRoot) {
+  const npmCli = process.env.npm_execpath
+  if (!npmCli) return { ok: false, reason: 'npm did not provide its install executable' }
+
+  const install = childProcess.spawnSync(
+    process.execPath,
+    [npmCli, 'install', 'fuse-native@2.2.6', '--no-save', '--ignore-scripts', '--no-package-lock'],
+    {
+      cwd: packageRoot,
+      stdio: 'inherit',
+      env: { ...process.env, npm_config_ignore_scripts: 'true' }
+    }
+  )
+  if (install.status !== 0) return { ok: false, reason: 'could not restore optional fuse-native source' }
+  return { ok: true }
+}
+
 function validateMacFuseNativeBinding ({
   packageRoot = path.resolve(__dirname, '..', '..'),
   exists = fs.existsSync,
@@ -184,8 +201,20 @@ function installMacFuseAdapter ({
     return { skipped: true, ...installation }
   }
 
-  const fuseNativeDir = getFuseNativeDirectory(packageRoot)
-  const darwinLibraryDir = getDarwinLibraryDirectory(packageRoot)
+  let fuseNativeDir = getFuseNativeDirectory(packageRoot)
+  let darwinLibraryDir = getDarwinLibraryDirectory(packageRoot)
+  if (!fuseNativeDir || !darwinLibraryDir) {
+    // The legacy optional addon can fail to build on arm64 before our root
+    // postinstall runs. Restore its source without lifecycle scripts, then
+    // patch and rebuild it against the system macFUSE library below.
+    const restored = installOptionalFuseNative(packageRoot)
+    if (!restored.ok) {
+      log.warn(`[tas] macOS FUSE was not built: ${restored.reason}`)
+      return { ready: false, reason: restored.reason }
+    }
+    fuseNativeDir = getFuseNativeDirectory(packageRoot)
+    darwinLibraryDir = getDarwinLibraryDirectory(packageRoot)
+  }
   if (!fuseNativeDir || !darwinLibraryDir) {
     const reason = 'optional fuse-native dependencies are not installed'
     log.warn(`[tas] macOS FUSE was not built: ${reason}`)
@@ -228,6 +257,7 @@ module.exports = {
   MACFUSE_BUNDLE,
   findMacFuseInstallation,
   getFuseNativeDirectory,
+  installOptionalFuseNative,
   validateMacFuseNativeBinding,
   installMacFuseAdapter
 }
