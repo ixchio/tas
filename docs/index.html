@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>TAS — Telegram as Storage</title>
-  <meta name="description" content="Free encrypted unlimited cloud storage inside Telegram. Zero-knowledge. Open source.">
+  <meta name="description" content="Experimental local-first encrypted file transport over Telegram bots. Open source; no durability guarantee.">
   <meta name="theme-color" content="#0a0a0a">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📦</text></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -33,9 +33,9 @@
   <!-- HERO -->
   <section class="hero">
     <div class="w">
-      <p class="hero-sub">Open source · MIT · v2.4.0</p>
-      <h1>Your files encrypted.<br>Stored in Telegram.<br>Free forever.</h1>
-      <p class="hero-lead">TAS turns a private Telegram bot chat into zero-knowledge cloud storage. AES-256-GCM encryption, FUSE mount, folder sync, expiring share links. One CLI. No accounts. No subscriptions.</p>
+      <p class="hero-sub">Open source · MIT · v3.0.0 · experimental</p>
+      <h1>Your files encrypted.<br>Transported through Telegram.<br>Indexed locally.</h1>
+      <p class="hero-lead">TAS is an experimental local-first CLI with AES-256-GCM content encryption, resumable 19 MiB chunks, encrypted index recovery, Linux FUSE mount, sync, and multi-bot routing. It is not an unlimited-storage or durability service.</p>
       <div class="hero-actions">
         <a href="https://github.com/ixchio/tas" class="btn-p">GitHub</a>
         <a href="#install" class="btn-s">Get started</a>
@@ -56,10 +56,10 @@
       <div class="prose">
         <p>I had a tax spreadsheet, a folder of scanned contracts, and a growing paranoia about what Google does with files sitting in Drive. They scan them. It's in the terms. They scan your documents to serve you better ads. That's the deal.</p>
         <p>Dropbox wants twelve dollars a month. iCloud is fine if you live inside Apple's ecosystem and don't mind another monthly charge. Mega gives you 20 gigs for free with closed-source encryption — you're trusting a company in New Zealand that's been through multiple ownership changes to keep your files safe and honest.</p>
-        <p>I started thinking about where I could store encrypted files for free, with no cap, using infrastructure that already exists. And then it clicked: <strong>Telegram's Bot API lets you send documents up to 2 GB to a private chat with your own bot. There are no storage limits. No monthly fees. It just… works.</strong></p>
-        <p>So I wrote a CLI that compresses files, encrypts them locally with AES-256-GCM, splits them into 49 MB chunks, and uploads them to a Telegram bot chat. The bot never sees plaintext. Telegram never sees filenames. The password never leaves your machine.</p>
+        <p>I started exploring whether an existing messaging API could act as an encrypted blob transport. Telegram's Bot API can send documents, but it provides TAS no storage quota, retention SLA, recovery service, or promise that bots/accounts will remain available.</p>
+        <p>So I wrote a CLI that compresses files, encrypts them locally with AES-256-GCM, splits them into 19 MiB payload chunks, and uploads them to bot chats. New chunks omit the user filename and original size from Telegram-visible fields. Telegram still observes timing, bot/chat identity, encrypted sizes, and chunk counts.</p>
         <p>That was the first version. Then I added FUSE mounting so you can drag files in like a regular folder. Then folder sync, so changes upload automatically. Then expiring share links with a download page. Then resume for interrupted uploads, integrity verification, JSON output for scripting, and a diagnostics command. It became a real tool.</p>
-        <p>I'm not pretending this replaces proper backups. Telegram is a messaging app, not a storage provider. They can delete messages. They can change their API. Use TAS alongside real backups, not instead of them. But for a personal encrypted vault that costs nothing and doesn't require trusting anyone with your data — it works remarkably well.</p>
+        <p>This does not replace proper backups. Telegram is a messaging app, not a storage provider, and its current Bot Developer Terms may restrict cloud-storage use cases. Use TAS at your own risk and only alongside a tested independent backup.</p>
       </div>
     </div>
   </section>
@@ -77,8 +77,8 @@
       <div class="pipeline">
         <div class="step"><span class="step-num">1</span><strong>Compress</strong><br>Gzip level 6. Skipped automatically for formats that don't benefit — mp4, zip, jpg, pdf, and about 30 others.</div>
         <div class="step"><span class="step-num">2</span><strong>Encrypt</strong><br>AES-256-GCM with a key derived from your password via PBKDF2-SHA512 at 600,000 iterations. Random 32-byte salt and 12-byte IV per file.</div>
-        <div class="step"><span class="step-num">3</span><strong>Chunk</strong><br>Split into 49 MB pieces with a 64-byte WAS1 header containing size, chunk index, and flags. Telegram's Bot API limit is 50 MB.</div>
-        <div class="step"><span class="step-num">4</span><strong>Upload</strong><br>Sent to your private bot chat with rate limiting (1 msg/sec) and exponential backoff retry. If it fails, it retries. If the process dies, <code>tas resume</code> picks up where it stopped.</div>
+        <div class="step"><span class="step-num">3</span><strong>Chunk</strong><br>Stage 19 MiB encrypted payloads with a 64-byte metadata-free public routing header, keeping each document below the hosted 20 MB getFile limit.</div>
+        <div class="step"><span class="step-num">4</span><strong>Upload</strong><br>Persist each result in SQLite, serialize sends per bot, retry transient failures, and continue staged network uploads with <code>tas resume</code>.</div>
       </div>
 
       <div class="prose" style="margin-top: 40px">
@@ -87,8 +87,8 @@
 
       <div class="zk-box">
         <p class="zk-label">What Telegram sees in your bot chat</p>
-        <code>a7f3b2c1e9d4.tas — 12.4 MB — application/octet-stream</code>
-        <p class="zk-note">No filename. No metadata. No content type. Encrypted noise.</p>
+        <code>chunk-000000.tas — 12.4 MB — tas:c1:42:1/2</code>
+        <p class="zk-note">No user filename or original size. Encrypted content; traffic metadata remains visible.</p>
       </div>
     </div>
   </section>
@@ -103,7 +103,7 @@
       <div class="feat-list">
         <div class="feat-item">
           <h3>FUSE mount</h3>
-          <p>Run <code>tas mount ~/cloud</code> and Telegram storage appears as a regular folder. Open files in any app. Save directly. Unmount when you're done. Requires libfuse on Linux, macFUSE on macOS.</p>
+          <p>Run <code>tas mount ~/cloud</code> on a validated Linux/libfuse host. Nested sync paths are real virtual directories and writes are disk-backed. macOS mount is disabled until TAS has a maintained current-macFUSE backend and CI.</p>
         </div>
         <div class="feat-item">
           <h3>Folder sync</h3>
@@ -248,23 +248,23 @@ tas list --json | jq '.[].filename'</pre>
       <div class="faq">
         <details>
           <summary>Is this actually free?</summary>
-          <p>Yes. TAS is MIT-licensed open source. It uses Telegram's Bot API, which is free with no storage limits. The catch: Telegram is a messaging app, not a storage provider. They could change their API or delete messages. Don't use TAS as your only backup.</p>
+          <p>TAS is MIT-licensed and charges no service fee. Telegram does not promise TAS an unlimited quota, retention, durability, or continued account access. Do not use TAS as your only backup.</p>
         </details>
         <details>
           <summary>Can Telegram read my files?</summary>
-          <p>No. Everything is encrypted on your machine before upload. Telegram receives opaque binary blobs. Without your password, the data is indistinguishable from random noise.</p>
+          <p>File content is encrypted locally with AES-256-GCM. Telegram cannot read that plaintext without the password, but it still observes traffic metadata and controls the bot account and messages.</p>
         </details>
         <details>
           <summary>What if I forget my password?</summary>
-          <p>Your data is gone. Zero-knowledge means nobody — including you — can recover files without the password. Write it down somewhere safe.</p>
+          <p>TAS cannot decrypt the content or recovery manifest without the password. Store it securely and separately from <code>config.json</code>.</p>
         </details>
         <details>
           <summary>How big can files be?</summary>
-          <p>Unlimited in practice. Telegram supports 2 GB per document. TAS chunks files into 49 MB pieces and reassembles them transparently.</p>
+          <p>TAS does not promise an unlimited file or vault size. It splits streams into 19 MiB payload chunks so hosted Bot API downloads remain possible; practical scale depends on local disk, SQLite, network time, Telegram limits, and provider retention.</p>
         </details>
         <details>
           <summary>Does this violate Telegram's ToS?</summary>
-          <p>No. TAS uses the official Bot API — the same API used by millions of bots. It sends documents to a private chat with your own bot. Nothing in Telegram's terms prohibits this.</p>
+          <p>There is real policy risk. Telegram's current Bot Developer Terms restrict external cloud-storage use cases and rate-limit circumvention and permit termination. Multiple bots do not remove that risk. Use TAS at your own risk.</p>
         </details>
         <details>
           <summary>Why not restic or rclone?</summary>
@@ -272,7 +272,7 @@ tas list --json | jq '.[].filename'</pre>
         </details>
         <details>
           <summary>Windows support?</summary>
-          <p>CLI works everywhere Node.js runs, including Windows. FUSE mount is Linux/macOS only.</p>
+          <p>CLI operations work where Node.js and native dependencies are supported. FUSE mount is Linux-only in this release; macOS mount is explicitly unsupported.</p>
         </details>
       </div>
     </div>

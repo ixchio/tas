@@ -1,6 +1,6 @@
 /**
  * Telegram Bot client wrapper
- * Uses official Telegram Bot API - 2GB file limit, FREE, no ban risk!
+ * Uses the official Telegram Bot API.
  * Includes exponential backoff retry and rate limiting for production reliability.
  */
 
@@ -49,6 +49,7 @@ export class TelegramClient {
         this.bot = null;
         this.chatId = null;
         this._lastSendTime = 0;
+        this._sendQueue = Promise.resolve();
     }
 
     /**
@@ -126,7 +127,7 @@ export class TelegramClient {
 
     /**
      * Send a file to the storage chat
-     * Telegram supports up to 2GB for documents!
+     * Send a document through the configured Bot API endpoint.
      * Includes automatic retry with exponential backoff.
      */
     async sendFile(filePath, caption = '', options = {}) {
@@ -140,7 +141,7 @@ export class TelegramClient {
 
         const filename = path.basename(filePath);
 
-        return withRetry(async () => {
+        const operation = async () => withRetry(async () => {
             await this._rateLimit();
 
             let fileStream = fs.createReadStream(filePath);
@@ -163,6 +164,12 @@ export class TelegramClient {
                 timestamp: message.date
             };
         }, `Upload ${filename}`);
+
+        // Serialize sends per bot/chat. Without a queue, concurrent sync
+        // workers all pass the timestamp check together and burst the API.
+        const queued = this._sendQueue.then(operation, operation);
+        this._sendQueue = queued.catch(() => { });
+        return queued;
     }
 
     /**

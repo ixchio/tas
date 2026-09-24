@@ -1,7 +1,7 @@
 {
   "name": "@nightowne/tas-cli",
-  "version": "2.4.1",
-  "description": "Turn Telegram into unlimited free cloud storage ($0/month forever) • AES-256-GCM encryption • FUSE mount • CLI-first • Zero-knowledge • No signup required",
+  "version": "3.0.0",
+  "description": "Experimental local-first encrypted file transport over Telegram bots with resumable chunks, index recovery, and Linux FUSE mount",
   "type": "module",
   "main": "src/index.js",
   "bin": {
@@ -15,15 +15,18 @@
   },
   "keywords": [
     "telegram",
+    "telegram-bot",
     "storage",
     "cloud",
     "encryption",
+    "end-to-end-encryption",
     "backup",
+    "offsite-backup",
     "sync",
     "fuse",
     "mount",
-    "free-storage",
     "file-manager",
+    "file-sharing",
     "cli"
   ],
   "author": "ixchio",
@@ -40,6 +43,9 @@
     "src/",
     "systemd/",
     "README.md",
+    "QUICKSTART.md",
+    "FAQ.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "dependencies": {

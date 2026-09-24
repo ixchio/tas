@@ -10,17 +10,60 @@ import chalk from 'chalk';
 import ora from 'ora';
 import inquirer from 'inquirer';
 import { TelegramClient } from './telegram/client.js';
+import { TelegramPool, MULTI_BOT_WARNING } from './telegram/pool.js';
 import { Encryptor } from './crypto/encryption.js';
 import { Compressor } from './utils/compression.js';
 import { FileIndex } from './db/index.js';
 import { processFile, retrieveFile } from './index.js';
+import { backupRemoteManifest, downloadRemoteManifest } from './manifest.js';
 import { printBanner, LOGO, TAGLINE, VERSION } from './utils/branding.js';
-import { getPassword, verifyPassword, loadConfig, requireConfig, getAndVerifyPassword, decryptBotToken, resolveConfig } from './utils/cli-helpers.js';
+import {
+    getPassword,
+    verifyPassword,
+    loadConfig,
+    requireConfig,
+    getAndVerifyPassword,
+    resolveConfig,
+    getBotEntries,
+    encryptBotToken,
+    saveConfig
+} from './utils/cli-helpers.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
 const DATA_DIR = process.env.TAS_DATA_DIR || path.join(os.homedir(), '.tas');
+
+function normalizeBotId(value) {
+    return String(value || 'bot')
+        .toLowerCase()
+        .replace(/^@/, '')
+        .replace(/[^a-z0-9_-]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 32) || 'bot';
+}
+
+function warnIfMultiBot(config) {
+    if ((config.bots || []).filter(bot => bot.enabled !== false).length > 1) {
+        console.log(chalk.yellow(`⚠ ${MULTI_BOT_WARNING}\n`));
+    }
+}
+
+function migrateConfigToV3(rawConfig, password) {
+    const bots = getBotEntries(rawConfig).map(bot => ({
+        id: bot.id,
+        encryptedBotToken: bot.encryptedBotToken || encryptBotToken(bot.botToken, password),
+        chatId: bot.chatId,
+        username: bot.username,
+        enabled: bot.enabled !== false,
+        createdAt: bot.createdAt || new Date().toISOString()
+    }));
+    const migrated = { ...rawConfig, bots, configVersion: 3 };
+    delete migrated.botToken;
+    delete migrated.encryptedBotToken;
+    delete migrated.chatId;
+    return migrated;
+}
 
 // Global error handlers — prevent silent crashes
 process.on('unhandledRejection', (reason) => {
@@ -45,7 +88,7 @@ const program = new Command();
 
 program
     .name('tas')
-    .description(chalk.cyan('📦 TAS') + chalk.dim(' - Telegram as Storage | Free • Encrypted • Unlimited'))
+    .description(chalk.cyan('📦 TAS') + chalk.dim(' - Experimental encrypted storage over Telegram'))
     .version(VERSION)
     .hook('preAction', (thisCommand) => {
         // Show banner for main commands
@@ -58,7 +101,10 @@ program
 program
     .command('init')
     .description('Initialize TAS and connect to Telegram')
-    .action(async () => {
+    .option('--token <token>', 'Telegram bot token (non-interactive / CI mode)')
+    .option('--chat <chatId>', 'Telegram chat ID (non-interactive / CI mode)')
+    .option('-p, --password <password>', 'Encryption password (non-interactive / CI mode, or TAS_PASSWORD env)')
+    .action(async (options) => {
         console.log(chalk.cyan('\n🚀 Initializing Telegram as Storage...\n'));
 
         // Ensure data directory exists
@@ -66,42 +112,67 @@ program
             fs.mkdirSync(DATA_DIR, { recursive: true });
         }
 
-        // Get bot token
-        console.log(chalk.yellow('📱 First, create a Telegram bot:'));
-        console.log(chalk.dim('   1. Open Telegram and message @BotFather'));
-        console.log(chalk.dim('   2. Send /newbot and follow the prompts'));
-        console.log(chalk.dim('   3. Copy the bot token\n'));
+        const envPassword = process.env.TAS_PASSWORD;
+        let token = options.token;
+        let password = options.password || envPassword;
+        let presetChatId = options.chat;
 
-        const { token } = await inquirer.prompt([
-            {
-                type: 'password',
-                name: 'token',
-                message: 'Enter your Telegram bot token:',
-                mask: '*',
-                validate: (input) => input.includes(':') || 'Invalid token format (should contain :)'
-            }
-        ]);
+        const nonInteractive = Boolean(token && presetChatId && password);
 
-        // Get encryption password
-        const { password } = await inquirer.prompt([
-            {
-                type: 'password',
-                name: 'password',
-                message: 'Set your encryption password (used for all files):',
-                mask: '*',
-                validate: (input) => input.length >= 8 || 'Password must be at least 8 characters'
-            }
-        ]);
+        if (!nonInteractive) {
+            // Get bot token
+            console.log(chalk.yellow('📱 First, create a Telegram bot:'));
+            console.log(chalk.dim('   1. Open Telegram and message @BotFather'));
+            console.log(chalk.dim('   2. Send /newbot and follow the prompts'));
+            console.log(chalk.dim('   3. Copy the bot token\n'));
+            console.log(chalk.dim('   Tip: `tas init --token <token> --chat <id> --password <pw>` skips all prompts (CI/Docker).\n'));
 
-        const { confirmPassword } = await inquirer.prompt([
-            {
-                type: 'password',
-                name: 'confirmPassword',
-                message: 'Confirm password:',
-                mask: '*',
-                validate: (input) => input === password || 'Passwords do not match'
+            if (!token) {
+                const answer = await inquirer.prompt([
+                    {
+                        type: 'password',
+                        name: 'token',
+                        message: 'Enter your Telegram bot token:',
+                        mask: '*',
+                        validate: (input) => input.includes(':') || 'Invalid token format (should contain :)'
+                    }
+                ]);
+                token = answer.token;
             }
-        ]);
+
+            // Get encryption password
+            if (!password) {
+                const answer = await inquirer.prompt([
+                    {
+                        type: 'password',
+                        name: 'password',
+                        message: 'Set your encryption password (used for all files):',
+                        mask: '*',
+                        validate: (input) => input.length >= 8 || 'Password must be at least 8 characters'
+                    }
+                ]);
+                password = answer.password;
+
+                const { confirmPassword } = await inquirer.prompt([
+                    {
+                        type: 'password',
+                        name: 'confirmPassword',
+                        message: 'Confirm password:',
+                        mask: '*',
+                        validate: (input) => input === password || 'Passwords do not match'
+                    }
+                ]);
+            }
+        }
+
+        if (!token || !token.includes(':')) {
+            console.error(chalk.red('✗ Invalid bot token (should contain :)'));
+            process.exit(1);
+        }
+        if (!password || password.length < 8) {
+            console.error(chalk.red('✗ Password must be at least 8 characters'));
+            process.exit(1);
+        }
 
         // Initialize encryption
         const encryptor = new Encryptor(password);
@@ -114,27 +185,38 @@ program
             const botInfo = await client.initialize(token);
             spinner.succeed(`Connected as @${botInfo.username}`);
 
-            // Wait for user to message the bot
-            console.log(chalk.yellow(`\n📩 Now message your bot @${botInfo.username} on Telegram`));
-            console.log(chalk.dim('   (Just send any message to link your account)\n'));
+            let userInfo;
+            if (presetChatId) {
+                // Non-interactive: trust the provided chat ID (CI/Docker)
+                client.setChatId(presetChatId);
+                userInfo = { chatId: presetChatId, username: undefined, firstName: 'ci-user' };
+                spinner.succeed(`Using chat ID ${presetChatId} (non-interactive)`);
+            } else {
+                // Wait for user to message the bot
+                console.log(chalk.yellow(`\n📩 Now message your bot @${botInfo.username} on Telegram`));
+                console.log(chalk.dim('   (Just send any message to link your account)\n'));
 
-            spinner.start('Waiting for your message...');
-            const userInfo = await client.waitForChatId(120000);
-            spinner.succeed(`Linked to ${userInfo.firstName} (@${userInfo.username})`);
+                spinner.start('Waiting for your message...');
+                userInfo = await client.waitForChatId(120000);
+                spinner.succeed(`Linked to ${userInfo.firstName} (@${userInfo.username})`);
+            }
 
             // Save config (bot token encrypted with user's password)
-            const configPath = path.join(DATA_DIR, 'config.json');
             const encryptedToken = encryptor.encrypt(Buffer.from(token, 'utf-8')).toString('base64');
-            fs.writeFileSync(configPath, JSON.stringify({
-                encryptedBotToken: encryptedToken,
-                chatId: userInfo.chatId,
+            saveConfig(DATA_DIR, {
+                bots: [{
+                    id: 'primary',
+                    encryptedBotToken: encryptedToken,
+                    chatId: userInfo.chatId,
+                    username: botInfo.username,
+                    enabled: true,
+                    createdAt: new Date().toISOString()
+                }],
                 passwordHash: encryptor.getPasswordHash(),
                 username: userInfo.username,
                 createdAt: new Date().toISOString(),
-                configVersion: 2
-            }, null, 2));
-            // Restrict config file permissions — contains encrypted token and password hash
-            try { fs.chmodSync(configPath, 0o600); } catch { /* ignore on Windows */ }
+                configVersion: 3
+            });
 
             // Initialize database
             spinner.start('Initializing local index...');
@@ -146,10 +228,12 @@ program
             await client.bot.sendMessage(userInfo.chatId,
                 '📦 *TAS - Telegram as Storage*\n\n' +
                 '✅ Setup complete! This chat will store your encrypted files.\n\n' +
+                '⚠️ Experimental: Telegram provides no TAS durability or account guarantee. Keep another backup.\n\n' +
                 '_Do not delete messages in this chat._',
                 { parse_mode: 'Markdown' }
             );
 
+            console.log(chalk.yellow('\n⚠ TAS is experimental, Telegram provides no durability/account guarantee, and current Bot Developer Terms may restrict cloud-storage use. Keep an independent backup.'));
             console.log(chalk.cyan('\n🎉 TAS is ready! Use `tas push <file>` to upload files.\n'));
 
         } catch (err) {
@@ -158,66 +242,332 @@ program
         }
     });
 
+// ============== BOT POOL COMMANDS ==============
+const botCmd = program
+    .command('bot')
+    .description('Manage the experimental multi-bot storage pool');
+
+botCmd
+    .command('list')
+    .description('List configured bots without exposing their tokens')
+    .action(() => {
+        const config = requireConfig(DATA_DIR);
+        const bots = getBotEntries(config);
+        let db = null;
+        try {
+            db = new FileIndex(path.join(DATA_DIR, 'index.db'));
+            db.init();
+        } catch { /* an empty vault may not have a database yet */ }
+
+        console.log(chalk.cyan(`\n🤖 Telegram Bot Pool (${bots.length})\n`));
+        for (const bot of bots) {
+            const chunks = db ? db.countChunksByBot(bot.id) : 0;
+            const pendingChunks = db ? db.countPendingChunksByBot(bot.id) : 0;
+            const state = bot.enabled === false ? chalk.yellow('disabled') : chalk.green('enabled');
+            const username = bot.username ? `@${String(bot.username).replace(/^@/, '')}` : 'username unknown';
+            console.log(`  ${chalk.blue(bot.id.padEnd(16))} ${state}  ${username}  chat=${bot.chatId}  chunks=${chunks}  pending=${pendingChunks}`);
+        }
+        db?.close();
+        console.log(chalk.dim('\nDisabled bots remain configured so TAS can read their existing chunks.\n'));
+    });
+
+botCmd
+    .command('add')
+    .description('Add a bot to the experimental storage pool')
+    .option('--token <token>', 'Telegram bot token')
+    .option('--chat <chatId>', 'Telegram storage chat ID')
+    .option('--name <id>', 'Stable bot ID (letters, numbers, _ and -)')
+    .option('-p, --password <password>', 'Vault password (or TAS_PASSWORD)')
+    .option('--accept-risk', 'Acknowledge the multi-bot warning in non-interactive use')
+    .action(async (options) => {
+        const rawConfig = requireConfig(DATA_DIR);
+        const password = await getAndVerifyPassword(options.password, DATA_DIR);
+
+        console.log(chalk.yellow(`\n⚠ ${MULTI_BOT_WARNING}\n`));
+        if (!options.acceptRisk) {
+            if (!process.stdin.isTTY) {
+                throw new Error('Non-interactive bot add requires --accept-risk');
+            }
+            const { accepted } = await inquirer.prompt([{
+                type: 'confirm',
+                name: 'accepted',
+                message: 'I understand and still want to add another bot',
+                default: false
+            }]);
+            if (!accepted) return;
+        }
+
+        let token = options.token;
+        if (!token) {
+            ({ token } = await inquirer.prompt([{
+                type: 'password',
+                name: 'token',
+                message: 'Enter the additional Telegram bot token:',
+                mask: '*',
+                validate: input => input.includes(':') || 'Invalid token format (should contain :)'
+            }]));
+        }
+        if (!token || !token.includes(':')) throw new Error('Invalid bot token (should contain :)');
+        if (resolveConfig(rawConfig, password).bots.some(bot => bot.botToken === token)) {
+            throw new Error('That bot token is already configured');
+        }
+
+        const client = new TelegramClient(DATA_DIR);
+        const info = await client.initialize(token);
+        let chatId = options.chat;
+        if (!chatId) {
+            console.log(chalk.yellow(`\n📩 Send any message to @${info.username} to select its storage chat.`));
+            ({ chatId } = await client.waitForChatId(120000));
+        }
+        client.setChatId(chatId);
+
+        const config = migrateConfigToV3(rawConfig, password);
+        const baseId = normalizeBotId(options.name || info.username);
+        let id = baseId;
+        let suffix = 2;
+        while (config.bots.some(bot => bot.id === id)) id = `${baseId.slice(0, 28)}-${suffix++}`;
+
+        config.bots.push({
+            id,
+            encryptedBotToken: encryptBotToken(token, password),
+            chatId,
+            username: info.username,
+            enabled: true,
+            createdAt: new Date().toISOString()
+        });
+        config.multiBotRiskAcceptedAt = new Date().toISOString();
+        saveConfig(DATA_DIR, config);
+
+        await client.bot.sendMessage(chatId,
+            '📦 *TAS storage bot added*\n\n' +
+            '⚠️ Experimental. This does not guarantee quota, durability, ban avoidance, or Terms compliance. Keep another backup.\n\n' +
+            '_Do not delete TAS chunk messages in this chat._',
+            { parse_mode: 'Markdown' }
+        );
+        console.log(chalk.green(`\n✓ Added @${info.username} as bot ID "${id}"\n`));
+    });
+
+async function setBotEnabled(id, enabled, options) {
+    const rawConfig = requireConfig(DATA_DIR);
+    const password = await getAndVerifyPassword(options.password, DATA_DIR);
+    const config = migrateConfigToV3(rawConfig, password);
+    const bot = config.bots.find(entry => entry.id === id);
+    if (!bot) throw new Error(`Unknown bot ID: ${id}`);
+    if (!enabled && config.bots.filter(entry => entry.enabled !== false).length <= 1) {
+        throw new Error('Cannot disable the last enabled bot');
+    }
+    bot.enabled = enabled;
+    saveConfig(DATA_DIR, config);
+    console.log(chalk.green(`✓ ${enabled ? 'Enabled' : 'Disabled'} bot "${id}"`));
+    if (!enabled) console.log(chalk.dim('  Existing chunks remain readable through this bot.'));
+}
+
+botCmd
+    .command('enable <id>')
+    .description('Enable a configured bot for new uploads')
+    .option('-p, --password <password>', 'Vault password (or TAS_PASSWORD)')
+    .action((id, options) => setBotEnabled(id, true, options));
+
+botCmd
+    .command('disable <id>')
+    .description('Stop routing new chunks to a bot but keep old chunks readable')
+    .option('-p, --password <password>', 'Vault password (or TAS_PASSWORD)')
+    .action((id, options) => setBotEnabled(id, false, options));
+
+botCmd
+    .command('remove <id>')
+    .description('Remove an unused bot (refuses while indexed chunks depend on it)')
+    .option('-p, --password <password>', 'Vault password (or TAS_PASSWORD)')
+    .action(async (id, options) => {
+        const rawConfig = requireConfig(DATA_DIR);
+        const password = await getAndVerifyPassword(options.password, DATA_DIR);
+        const config = migrateConfigToV3(rawConfig, password);
+        const index = config.bots.findIndex(bot => bot.id === id);
+        if (index < 0) throw new Error(`Unknown bot ID: ${id}`);
+        if (config.bots.length === 1) throw new Error('Cannot remove the only configured bot');
+        if (rawConfig.remoteManifest?.botId === id) {
+            throw new Error(`Cannot remove "${id}": the current remote recovery manifest depends on it. Run \`tas index backup\` after enabling another bot first.`);
+        }
+
+        const db = new FileIndex(path.join(DATA_DIR, 'index.db'));
+        db.init();
+        const chunkCount = db.countChunksByBot(id);
+        const pendingChunkCount = db.countPendingChunksByBot(id);
+        db.close();
+        if (chunkCount > 0 || pendingChunkCount > 0) {
+            throw new Error(
+                `Cannot remove "${id}": ${chunkCount} indexed and ${pendingChunkCount} pending chunk(s) still depend on it. Disable it instead.`
+            );
+        }
+
+        config.bots.splice(index, 1);
+        if (!config.bots.some(bot => bot.enabled !== false)) config.bots[0].enabled = true;
+        saveConfig(DATA_DIR, config);
+        console.log(chalk.green(`✓ Removed unused bot "${id}"`));
+    });
+
+// ============== REMOTE INDEX RECOVERY ==============
+const indexCmd = program
+    .command('index')
+    .description('Back up or rebuild the local SQLite index');
+
+indexCmd
+    .command('backup')
+    .description('Publish a fresh encrypted index manifest to Telegram')
+    .option('-p, --password <password>', 'Vault password (or TAS_PASSWORD)')
+    .action(async (options) => {
+        const rawConfig = requireConfig(DATA_DIR);
+        const password = await getAndVerifyPassword(options.password, DATA_DIR);
+        const config = resolveConfig(rawConfig, password);
+        const pool = new TelegramPool(DATA_DIR, config.bots);
+        const manifest = await backupRemoteManifest({ dataDir: DATA_DIR, password, config, telegramPool: pool });
+        console.log(chalk.green(`✓ Encrypted recovery manifest published (${manifest.files} files, ${manifest.chunks} chunks)`));
+    });
+
+indexCmd
+    .command('rebuild')
+    .description('Rebuild index.db from the encrypted remote manifest')
+    .option('-p, --password <password>', 'Vault password (or TAS_PASSWORD)')
+    .option('--force', 'Replace the current index without an interactive confirmation')
+    .action(async (options) => {
+        const rawConfig = requireConfig(DATA_DIR);
+        const password = await getAndVerifyPassword(options.password, DATA_DIR);
+        const config = resolveConfig(rawConfig, password);
+        const pool = new TelegramPool(DATA_DIR, config.bots);
+
+        const spinner = ora('Downloading and authenticating remote manifest...').start();
+        const manifest = await downloadRemoteManifest({ dataDir: DATA_DIR, password, config, telegramPool: pool });
+        spinner.succeed(`Authenticated manifest: ${manifest.files.length} files, ${manifest.chunks.length} chunks`);
+
+        const dbPath = path.join(DATA_DIR, 'index.db');
+        let currentCount = 0;
+        if (fs.existsSync(dbPath)) {
+            const current = new FileIndex(dbPath);
+            current.init();
+            currentCount = current.getStats().file_count;
+            current.close();
+        }
+        if (currentCount > 0 && !options.force) {
+            if (!process.stdin.isTTY) throw new Error('Refusing to replace a non-empty index without --force');
+            const { confirmed } = await inquirer.prompt([{
+                type: 'confirm',
+                name: 'confirmed',
+                message: `Replace the current ${currentCount}-file index with the remote recovery point?`,
+                default: false
+            }]);
+            if (!confirmed) return;
+        }
+
+        let backupPath = null;
+        if (fs.existsSync(dbPath)) {
+            backupPath = `${dbPath}.backup-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+            const current = new FileIndex(dbPath);
+            current.init();
+            current.db.pragma('wal_checkpoint(TRUNCATE)');
+            current.close();
+            fs.copyFileSync(dbPath, backupPath);
+        }
+
+        const rebuilt = new FileIndex(dbPath);
+        rebuilt.init();
+        rebuilt.importManifest(manifest);
+        const integrity = rebuilt.db.pragma('integrity_check', { simple: true });
+        rebuilt.close();
+        if (integrity !== 'ok') throw new Error(`SQLite integrity check failed after rebuild: ${integrity}`);
+
+        console.log(chalk.green(`✓ Rebuilt index with ${manifest.files.length} files`));
+        if (backupPath) console.log(chalk.dim(`  Previous index backup: ${backupPath}`));
+    });
+
 // ============== PUSH COMMAND ==============
 program
-    .command('push <file>')
-    .description('Upload a file to Telegram storage')
-    .option('-n, --name <name>', 'Custom name for the file')
+    .command('push <files...>')
+    .description('Upload one or more files to Telegram storage')
+    .option('-n, --name <name>', 'Custom name for the file (single-file uploads only)')
     .option('-p, --password <password>', 'Encryption password (uses TAS_PASSWORD env var if not provided)')
-    .action(async (file, options) => {
-        const spinner = ora('Preparing...').start();
-
-        try {
-            // Check file exists
-            if (!fs.existsSync(file)) {
-                spinner.fail(`File not found: ${file}`);
-                process.exit(1);
-            }
-
-            const rawConfig = requireConfig(DATA_DIR);
-            spinner.stop();
-
-            // Get and verify password
-            const password = await getAndVerifyPassword(options.password, DATA_DIR);
-            const config = resolveConfig(rawConfig, password);
-
-            spinner.start('Processing file...');
-
-            // Import progress bar
-            const { ProgressBar } = await import('./utils/progress.js');
-            let progressBar = null;
-
-            // Process and upload
-            const result = await processFile(file, {
-                password,
-                dataDir: DATA_DIR,
-                customName: options.name,
-                config,
-                onProgress: (msg) => {
-                    if (!progressBar) spinner.text = msg;
-                },
-                onByteProgress: ({ uploaded, total }) => {
-                    if (!progressBar) {
-                        spinner.stop();
-                        progressBar = new ProgressBar({ label: 'Uploading', total });
-                    }
-                    progressBar.update(uploaded);
-                }
-            });
-
-            if (progressBar) {
-                progressBar.complete(`Uploaded: ${result.filename}`);
-            } else {
-                spinner.succeed(`Uploaded: ${chalk.green(result.filename)}`);
-            }
-            console.log(chalk.dim(`  Hash: ${result.hash}`));
-            console.log(chalk.dim(`  Size: ${formatBytes(result.originalSize)} → ${formatBytes(result.storedSize)}`));
-            console.log(chalk.dim(`  Chunks: ${result.chunks}`));
-
-        } catch (err) {
-            spinner.fail(`Upload failed: ${err.message}`);
+    .action(async (files, options) => {
+        if (files.length > 1 && options.name) {
+            console.error(chalk.red('✗ --name can only be used with a single file'));
             process.exit(1);
         }
+
+        const rawConfig = requireConfig(DATA_DIR);
+
+        // Get and verify password once for the whole batch
+        const password = await getAndVerifyPassword(options.password, DATA_DIR);
+        const config = resolveConfig(rawConfig, password);
+        warnIfMultiBot(config);
+        const telegramPool = new TelegramPool(DATA_DIR, config.bots);
+        await telegramPool.initialize({ includeDisabled: false });
+
+        const { ProgressBar } = await import('./utils/progress.js');
+        let succeeded = 0;
+        let failed = 0;
+
+        for (const file of files) {
+            const spinner = ora(`Preparing ${file}...`).start();
+            try {
+                if (!fs.existsSync(file)) {
+                    spinner.fail(`File not found: ${file}`);
+                    failed++;
+                    continue;
+                }
+                if (!fs.statSync(file).isFile()) {
+                    spinner.fail(`Not a file, skipping: ${file}`);
+                    failed++;
+                    continue;
+                }
+
+                spinner.text = 'Processing file...';
+                let progressBar = null;
+
+                const result = await processFile(file, {
+                    password,
+                    dataDir: DATA_DIR,
+                    customName: options.name,
+                    config,
+                    telegramPool,
+                    updateManifest: false,
+                    onProgress: (msg) => {
+                        if (!progressBar) spinner.text = `${file}: ${msg}`;
+                    },
+                    onByteProgress: ({ uploaded, total }) => {
+                        if (!progressBar) {
+                            spinner.stop();
+                            progressBar = new ProgressBar({ label: `Uploading ${file}`, total });
+                        }
+                        progressBar.update(uploaded);
+                    }
+                });
+
+                if (progressBar) {
+                    progressBar.complete(`Uploaded: ${result.filename}`);
+                } else {
+                    spinner.succeed(`Uploaded: ${chalk.green(result.filename)}`);
+                }
+                console.log(chalk.dim(`  Hash: ${result.hash}`));
+                console.log(chalk.dim(`  Size: ${formatBytes(result.originalSize)} → ${formatBytes(result.storedSize)}`));
+                console.log(chalk.dim(`  Chunks: ${result.chunks}`));
+                succeeded++;
+            } catch (err) {
+                spinner.fail(`Upload failed for ${file}: ${err.message}`);
+                failed++;
+            }
+        }
+
+        if (files.length > 1) {
+            console.log(chalk.cyan(`\nDone: ${succeeded} uploaded, ${failed} failed\n`));
+        }
+        if (succeeded > 0) {
+            try {
+                await backupRemoteManifest({ dataDir: DATA_DIR, password, config, telegramPool });
+                console.log(chalk.dim('Encrypted remote recovery manifest updated.'));
+            } catch (error) {
+                console.log(chalk.yellow(`⚠ Files uploaded, but recovery manifest update failed: ${error.message}`));
+                process.exitCode = 1;
+            }
+        }
+        if (failed > 0) process.exitCode = 1;
     });
 
 // ============== PULL COMMAND ==============
@@ -247,6 +597,7 @@ program
             // Get and verify password
             const password = await getAndVerifyPassword(options.password, DATA_DIR);
             const config = resolveConfig(rawConfig, password);
+            warnIfMultiBot(config);
 
             spinner.start('Downloading...');
 
@@ -344,7 +695,7 @@ program
     .alias('rm')
     .description('Remove a file from the index (optionally from Telegram too)')
     .option('--hard', 'Also delete from Telegram')
-    .option('-p, --password <password>', 'Encryption password (required for --hard)')
+    .option('-p, --password <password>', 'Encryption password (or TAS_PASSWORD)')
     .action(async (identifier, options) => {
         try {
             const db = new FileIndex(path.join(DATA_DIR, 'index.db'));
@@ -356,33 +707,43 @@ program
                 process.exit(1);
             }
 
+            if (!options.hard) {
+                console.log(chalk.yellow('  Note: default delete removes the local index entry only — the encrypted copy stays on Telegram. Use --hard to also delete the Telegram message.'));
+            } else {
+                console.log(chalk.yellow('  Note: --hard deletes the Telegram message, but Telegram may retain the underlying file blob (file_id can outlive the message). Treat as best-effort, not cryptographic erasure.'));
+            }
+
             const { confirm } = await inquirer.prompt([
                 {
                     type: 'confirm',
                     name: 'confirm',
-                    message: `Delete "${fileRecord.filename}" from index${options.hard ? ' and Telegram' : ''}?`,
+                    message: `Delete "${fileRecord.filename}" from index${options.hard ? ' and Telegram message' : ' (Telegram copy retained)'}?`,
                     default: false
                 }
             ]);
 
             if (confirm) {
-                // If hard delete, also remove from Telegram
-                if (options.hard) {
-                    const rawConfig = requireConfig(DATA_DIR);
-                    const password = await getAndVerifyPassword(options.password, DATA_DIR);
-                    const config = resolveConfig(rawConfig, password);
+                const rawConfig = requireConfig(DATA_DIR);
+                const password = await getAndVerifyPassword(options.password, DATA_DIR);
+                const config = resolveConfig(rawConfig, password);
+                warnIfMultiBot(config);
+                const client = new TelegramPool(DATA_DIR, config.bots);
+                const chunks = db.getChunks(fileRecord.id);
+                const before = db.exportManifest({ includeShares: true });
+                db.delete(fileRecord.id);
 
-                    const client = new TelegramClient(DATA_DIR);
-                    await client.initialize(config.botToken);
-                    client.setChatId(config.chatId);
-
-                    const chunks = db.getChunks(fileRecord.id);
-                    for (const chunk of chunks) {
-                        await client.deleteMessage(chunk.message_id);
-                    }
+                try {
+                    await backupRemoteManifest({ dataDir: DATA_DIR, password, config, telegramPool: client });
+                } catch (error) {
+                    db.importManifest(before);
+                    throw new Error(`Delete rolled back because the recovery manifest could not be updated: ${error.message}`);
                 }
 
-                db.delete(fileRecord.id);
+                if (options.hard) {
+                    for (const chunk of chunks) {
+                        await client.deleteMessage(chunk.message_id, chunk.bot_id || null);
+                    }
+                }
                 console.log(chalk.green(`✓ Removed "${fileRecord.filename}"`));
             }
 
@@ -417,12 +778,16 @@ program
         const totalSize = files.reduce((acc, f) => acc + f.original_size, 0);
         const storedSize = files.reduce((acc, f) => acc + f.stored_size, 0);
         const savings = totalSize > 0 ? Math.round((1 - storedSize / totalSize) * 100) : 0;
+        const bots = getBotEntries(config);
 
         if (options.json) {
             console.log(JSON.stringify({
                 initialized: true,
                 createdAt: config.createdAt,
                 username: config.username || 'unknown',
+                botCount: bots.length,
+                enabledBots: bots.filter(bot => bot.enabled !== false).length,
+                remoteManifest: config.remoteManifest || null,
                 fileCount: files.length,
                 totalSize,
                 storedSize,
@@ -436,6 +801,8 @@ program
         console.log(chalk.cyan('\n📊 TAS Status\n'));
         console.log(`  Initialized: ${chalk.white(new Date(config.createdAt).toLocaleDateString())}`);
         console.log(`  Telegram user: ${chalk.white('@' + (config.username || 'unknown'))}`);
+        console.log(`  Bot pool: ${chalk.white(`${bots.filter(bot => bot.enabled !== false).length}/${bots.length} enabled`)}`);
+        console.log(`  Recovery manifest: ${config.remoteManifest ? chalk.green(config.remoteManifest.createdAt) : chalk.yellow('not published yet')}`);
         console.log(`  Data dir: ${chalk.white(DATA_DIR)}`);
         console.log(`  Files stored: ${chalk.white(files.length)}`);
         console.log(`  Total size: ${chalk.white(formatBytes(totalSize))}`);
@@ -447,7 +814,7 @@ program
 // ============== MOUNT COMMAND ==============
 program
     .command('mount <mountpoint>')
-    .description('🔥 Mount Telegram storage as a local folder (FUSE)')
+    .description('🔥 Mount Telegram storage as a local folder (Linux FUSE only)')
     .option('-p, --password <password>', 'Encryption password (uses TAS_PASSWORD env var if not provided)')
     .action(async (mountpoint, options) => {
         console.log(chalk.cyan('\n🗂️  Mounting Telegram as filesystem...\n'));
@@ -505,7 +872,7 @@ program
             console.log(chalk.dim('\nNote: FUSE requires libfuse to be installed:'));
             console.log(chalk.dim('  Ubuntu/Debian: sudo apt install fuse libfuse-dev'));
             console.log(chalk.dim('  Fedora: sudo dnf install fuse fuse-devel'));
-            console.log(chalk.dim('  macOS: brew install macfuse\n'));
+            console.log(chalk.dim('  macOS: TAS mount is currently unsupported (push/pull/sync still work)\n'));
             process.exit(1);
         }
     });
@@ -521,13 +888,13 @@ program
         const spinner = ora('Unmounting...').start();
 
         try {
-            const { execSync } = await import('child_process');
+            const { execFileSync } = await import('child_process');
 
             // Use fusermount on Linux, umount on macOS
             const isMac = process.platform === 'darwin';
-            const cmd = isMac ? `umount "${absMount}"` : `fusermount -u "${absMount}"`;
-
-            execSync(cmd, { stdio: 'pipe' });
+            const executable = isMac ? 'umount' : 'fusermount';
+            const args = isMac ? [absMount] : ['-u', absMount];
+            execFileSync(executable, args, { stdio: 'pipe' });
 
             spinner.succeed(`Unmounted ${chalk.green(absMount)}`);
         } catch (err) {
@@ -545,10 +912,12 @@ const tagCmd = program
 tagCmd
     .command('add <file> <tags...>')
     .description('Add tags to a file')
-    .action(async (file, tags) => {
+    .option('-p, --password <password>', 'Encryption password (or TAS_PASSWORD)')
+    .action(async (file, tags, options) => {
         try {
             const db = new FileIndex(path.join(DATA_DIR, 'index.db'));
             db.init();
+            const before = db.exportManifest({ includeShares: true });
 
             const fileRecord = db.findByHash(file) || db.findByName(file);
             if (!fileRecord) {
@@ -558,6 +927,16 @@ tagCmd
 
             for (const tag of tags) {
                 db.addTag(fileRecord.id, tag);
+            }
+
+            const rawConfig = requireConfig(DATA_DIR);
+            const password = await getAndVerifyPassword(options.password, DATA_DIR);
+            const config = resolveConfig(rawConfig, password);
+            try {
+                await backupRemoteManifest({ dataDir: DATA_DIR, password, config });
+            } catch (error) {
+                db.importManifest(before);
+                throw new Error(`Tag update rolled back because the recovery manifest failed: ${error.message}`);
             }
 
             const allTags = db.getFileTags(fileRecord.id);
@@ -574,10 +953,12 @@ tagCmd
 tagCmd
     .command('remove <file> <tags...>')
     .description('Remove tags from a file')
-    .action(async (file, tags) => {
+    .option('-p, --password <password>', 'Encryption password (or TAS_PASSWORD)')
+    .action(async (file, tags, options) => {
         try {
             const db = new FileIndex(path.join(DATA_DIR, 'index.db'));
             db.init();
+            const before = db.exportManifest({ includeShares: true });
 
             const fileRecord = db.findByHash(file) || db.findByName(file);
             if (!fileRecord) {
@@ -587,6 +968,16 @@ tagCmd
 
             for (const tag of tags) {
                 db.removeTag(fileRecord.id, tag);
+            }
+
+            const rawConfig = requireConfig(DATA_DIR);
+            const password = await getAndVerifyPassword(options.password, DATA_DIR);
+            const config = resolveConfig(rawConfig, password);
+            try {
+                await backupRemoteManifest({ dataDir: DATA_DIR, password, config });
+            } catch (error) {
+                db.importManifest(before);
+                throw new Error(`Tag update rolled back because the recovery manifest failed: ${error.message}`);
             }
 
             const allTags = db.getFileTags(fileRecord.id);
@@ -744,7 +1135,7 @@ syncCmd
         if (options.limit) {
             const match = options.limit.match(/^(\d+)([kmg]?)$/i);
             if (!match) {
-                console.error(chalk.red('Invalid limit format. Use e.g. 500{}, 1m'));
+                console.error(chalk.red('Invalid limit format. Use e.g. 500k, 1m'));
                 process.exit(1);
             }
             const val = parseInt(match[1]);
@@ -790,6 +1181,10 @@ syncCmd
                 console.log(chalk.red(`  ✗ Failed: ${file} - ${error}`));
             });
 
+            syncEngine.on('manifest-error', ({ error }) => {
+                console.log(chalk.yellow(`  ⚠ Files synced, but remote recovery manifest failed: ${error}`));
+            });
+
             syncEngine.on('watch-start', ({ folder }) => {
                 console.log(chalk.cyan(`👁️  Watching: ${folder}`));
             });
@@ -830,6 +1225,7 @@ syncCmd
         const rawConfig = requireConfig(DATA_DIR);
         const password = await getAndVerifyPassword(options.password, DATA_DIR);
         const config = resolveConfig(rawConfig, password);
+        warnIfMultiBot(config);
 
         const spinner = ora('Loading...').start();
 
@@ -852,52 +1248,63 @@ syncCmd
 
             spinner.succeed(`Found ${files.length} files in Telegram`);
 
-            // Download each file that matches a sync folder
+            // Download each file that matches a sync folder.
+            // Remote files are stored under their sync relative path
+            // (customName at upload time), so join directly. A local file
+            // is skipped only when its content hash matches the index —
+            // existence alone is not enough (edited files must re-pull).
+            // Each file goes to the first folder only to avoid duplicates
+            // when several folders are registered.
             let downloaded = 0;
             let skipped = 0;
+            const { hashFile } = await import('./crypto/encryption.js');
+            const telegramPool = new TelegramPool(DATA_DIR, config.bots);
 
             for (const file of files) {
-                // Check if file belongs to any sync folder (by name prefix)
-                for (const folder of folders) {
-                    const folderName = path.basename(folder.local_path);
-                    const targetPath = path.join(folder.local_path, file.filename);
+                const folder = folders[0];
+                const targetPath = path.join(folder.local_path, file.filename);
 
-                    // Check if file already exists locally with same hash
-                    if (fs.existsSync(targetPath)) {
-                        skipped++;
-                        continue;
-                    }
-
-                    // Ensure directory exists
-                    const targetDir = path.dirname(targetPath);
-                    if (!fs.existsSync(targetDir)) {
-                        fs.mkdirSync(targetDir, { recursive: true });
-                    }
-
-                    console.log(chalk.dim(`  ↓ Downloading: ${file.filename}`));
-
+                // Skip only when local content already matches the index
+                if (fs.existsSync(targetPath) && fs.statSync(targetPath).isFile()) {
                     try {
-                        await retrieveFile(file, {
-                            password,
-                            dataDir: DATA_DIR,
-                            outputPath: targetPath,
-                            config,
-                            onProgress: () => { }
-                        });
-
-                        // Update sync state
-                        const { hashFile } = await import('./crypto/encryption.js');
-                        const hash = await hashFile(targetPath);
-                        const stats = fs.statSync(targetPath);
-                        db.updateSyncState(folder.id, file.filename, hash, stats.mtimeMs);
-
-                        console.log(chalk.green(`  ✓ Downloaded: ${file.filename}`));
-                        downloaded++;
-                    } catch (err) {
-                        console.log(chalk.red(`  ✗ Failed: ${file.filename} - ${err.message}`));
+                        const localHash = await hashFile(targetPath);
+                        if (localHash === file.hash) {
+                            skipped++;
+                            continue;
+                        }
+                        console.log(chalk.yellow(`  ↻ Updating modified file: ${file.filename}`));
+                    } catch {
+                        // Hash failed — fall through and re-download
                     }
+                }
 
-                    break; // Only download to first matching folder
+                // Ensure directory exists
+                const targetDir = path.dirname(targetPath);
+                if (!fs.existsSync(targetDir)) {
+                    fs.mkdirSync(targetDir, { recursive: true });
+                }
+
+                console.log(chalk.dim(`  ↓ Downloading: ${file.filename}`));
+
+                try {
+                    await retrieveFile(file, {
+                        password,
+                        dataDir: DATA_DIR,
+                        outputPath: targetPath,
+                        config,
+                        telegramPool,
+                        onProgress: () => { }
+                    });
+
+                    // Update sync state
+                    const hash = await hashFile(targetPath);
+                    const stats = fs.statSync(targetPath);
+                    db.updateSyncState(folder.id, file.filename, hash, stats.mtimeMs);
+
+                    console.log(chalk.green(`  ✓ Downloaded: ${file.filename}`));
+                    downloaded++;
+                } catch (err) {
+                    console.log(chalk.red(`  ✗ Failed: ${file.filename} - ${err.message}`));
                 }
             }
 
@@ -913,14 +1320,16 @@ syncCmd
 // ============== VERIFY COMMAND ==============
 program
     .command('verify')
-    .description('Verify file integrity and check for missing Telegram messages')
+    .description('Check Telegram references; use --deep to download, decrypt, and hash every file')
     .option('-p, --password <password>', 'Encryption password')
+    .option('--deep', 'Download, authenticate, decompress, and SHA-256 verify every file')
     .action(async (options) => {
         console.log(chalk.cyan('\n🔍 Verifying file integrity...\n'));
 
         const rawConfig = requireConfig(DATA_DIR);
         const password = await getAndVerifyPassword(options.password, DATA_DIR);
         const config = resolveConfig(rawConfig, password);
+        warnIfMultiBot(config);
 
         const spinner = ora('Checking files...').start();
 
@@ -936,15 +1345,14 @@ program
 
             spinner.text = 'Connecting to Telegram...';
 
-            const client = new TelegramClient(DATA_DIR);
-            await client.initialize(config.botToken);
-            client.setChatId(config.chatId);
+            const client = new TelegramPool(DATA_DIR, config.bots);
 
             spinner.succeed(`Checking ${files.length} files...`);
 
             let valid = 0;
             let missing = 0;
             let errors = [];
+            const verifyDir = options.deep ? fs.mkdtempSync(path.join(os.tmpdir(), 'tas-verify-')) : null;
 
             for (const file of files) {
                 const chunks = db.getChunks(file.id);
@@ -960,7 +1368,7 @@ program
                         }
 
                         // Check if file is accessible (will throw if deleted)
-                        await client.bot.getFile(chunk.file_telegram_id);
+                        await client.getFile(chunk.file_telegram_id, chunk.bot_id || null);
                     } catch (err) {
                         fileValid = false;
                         errors.push({
@@ -969,6 +1377,23 @@ program
                             error: err.message.includes('file') ? 'File deleted from Telegram' : err.message
                         });
                         break;
+                    }
+                }
+
+                if (fileValid && options.deep) {
+                    try {
+                        const verifyPath = path.join(verifyDir, String(file.id));
+                        await retrieveFile(file, {
+                            password,
+                            dataDir: DATA_DIR,
+                            outputPath: verifyPath,
+                            config,
+                            telegramPool: client
+                        });
+                        try { fs.unlinkSync(verifyPath); } catch { }
+                    } catch (error) {
+                        fileValid = false;
+                        errors.push({ file: file.filename, error: `Deep verification failed: ${error.message}` });
                     }
                 }
 
@@ -982,6 +1407,9 @@ program
             }
 
             console.log();
+            if (verifyDir) {
+                try { fs.rmSync(verifyDir, { recursive: true, force: true }); } catch { }
+            }
             console.log(chalk.cyan('📊 Verification Results'));
             console.log(`   Valid: ${chalk.green(valid)}`);
             console.log(`   Missing: ${chalk.red(missing)}`);
@@ -1061,9 +1489,44 @@ program
             db.init();
 
             const pending = db.getPendingUploads();
+            // Leftovers from pre-2.5 interrupted uploads (before processFile
+            // cleaned up partial rows atomically). Offer to clear them so a
+            // retry doesn't hit a phantom "duplicate hash".
+            let orphans = [];
+            try { orphans = db.getIncompleteUploads(); } catch { orphans = []; }
+
+            if (pending.length === 0 && orphans.length === 0) {
+                console.log(chalk.yellow('\n📭 No interrupted uploads found.\n'));
+                db.close();
+                return;
+            }
+
+            if (orphans.length > 0) {
+                console.log(chalk.yellow(`\n⚠ ${orphans.length} incomplete file record(s) from interrupted uploads (pre-2.5):\n`));
+                for (const o of orphans) {
+                    console.log(`  ${chalk.blue('●')} ${o.filename} ${chalk.dim(`(${o.actual_chunks}/${o.chunks} chunks)`)}`);
+                }
+                console.log(chalk.dim('\n  Current versions clean up partial uploads automatically.'));
+                console.log(chalk.dim('  Clear these leftovers, then re-run `tas push <file>` to retry.\n'));
+
+                const { clearOrphans } = await inquirer.prompt([
+                    {
+                        type: 'confirm',
+                        name: 'clearOrphans',
+                        message: 'Delete incomplete file records now?',
+                        default: true
+                    }
+                ]);
+                if (clearOrphans) {
+                    for (const o of orphans) {
+                        try { db.deleteFileCascade(o.id); } catch { }
+                    }
+                    console.log(chalk.green('✓ Cleared incomplete uploads — retry with `tas push <file>`'));
+                }
+                orphans = [];
+            }
 
             if (pending.length === 0) {
-                console.log(chalk.yellow('\n📭 No interrupted uploads found.\n'));
                 db.close();
                 return;
             }
@@ -1099,10 +1562,17 @@ program
             }
 
             if (action === 'clear') {
+                const rawConfig = requireConfig(DATA_DIR);
+                const password = await getAndVerifyPassword(options.password, DATA_DIR);
+                const config = resolveConfig(rawConfig, password);
+                const client = new TelegramPool(DATA_DIR, config.bots);
                 for (const upload of pending) {
                     // Clean up temp files
                     const chunks = db.getPendingChunks(upload.id);
                     for (const chunk of chunks) {
+                        if (chunk.uploaded && chunk.message_id) {
+                            try { await client.deleteMessage(chunk.message_id, chunk.bot_id || null); } catch { }
+                        }
                         try { fs.unlinkSync(chunk.chunk_path); } catch (e) { }
                     }
                     if (upload.temp_dir) {
@@ -1126,12 +1596,13 @@ program
             // Get and verify password
             const password = await getAndVerifyPassword(options.password, DATA_DIR);
             const config = resolveConfig(rawConfig, password);
+            warnIfMultiBot(config);
 
             // Connect to Telegram
-            const { TelegramClient } = await import('./telegram/client.js');
-            const client = new TelegramClient(DATA_DIR);
-            await client.initialize(config.botToken);
-            client.setChatId(config.chatId);
+            const client = new TelegramPool(DATA_DIR, config.bots);
+            await client.initialize({ includeDisabled: false });
+            const supersededChunks = [];
+            let completedUploads = 0;
 
             for (const upload of pending) {
                 console.log(chalk.cyan(`\n📤 Resuming: ${upload.filename}`));
@@ -1147,12 +1618,20 @@ program
 
                     console.log(chalk.dim(`  ↑ Uploading chunk ${chunk.chunk_index + 1}/${upload.total_chunks}...`));
 
-                    const caption = upload.total_chunks > 1
-                        ? `📦 ${upload.filename} (${chunk.chunk_index + 1}/${upload.total_chunks})`
-                        : `📦 ${upload.filename}`;
+                    const caption = `tas:c1:${upload.id}:${chunk.chunk_index + 1}/${upload.total_chunks}`;
 
-                    const result = await client.sendFile(chunk.chunk_path, caption);
-                    db.markChunkUploaded(upload.id, chunk.chunk_index, result.messageId.toString(), result.fileId);
+                    const result = await client.sendFile(chunk.chunk_path, caption, {
+                        botId: client.selectBotId(upload.hash, chunk.chunk_index),
+                        routingKey: upload.hash,
+                        chunkIndex: chunk.chunk_index
+                    });
+                    db.markChunkUploaded(
+                        upload.id,
+                        chunk.chunk_index,
+                        result.messageId.toString(),
+                        result.fileId,
+                        result.botId
+                    );
 
                     // Clean up temp file
                     fs.unlinkSync(chunk.chunk_path);
@@ -1161,35 +1640,63 @@ program
                 // All chunks uploaded - finalize
                 const allChunks = db.getPendingChunks(upload.id);
                 if (allChunks.every(c => c.uploaded)) {
-                    // Add to main files table
-                    const fileId = db.addFile({
-                        filename: upload.filename,
-                        hash: upload.hash,
-                        originalSize: upload.original_size,
-                        storedSize: upload.original_size, // Approximate
-                        chunks: upload.total_chunks,
-                        compressed: true
-                    });
+                    const existing = db.findByExactName(upload.filename);
+                    const existingChunks = existing ? db.getChunks(existing.id) : [];
+                    db.db.transaction(() => {
+                        const fileId = db.addFile({
+                            filename: upload.filename,
+                            hash: upload.hash,
+                            originalSize: upload.original_size,
+                            storedSize: upload.stored_size || Math.max(0, allChunks.reduce((sum, c) => sum + (c.size || 0), 0) - allChunks.length * 64),
+                            chunks: upload.total_chunks,
+                            compressed: Boolean(upload.compressed)
+                        });
 
-                    // Add chunk records
-                    for (const chunk of allChunks) {
-                        db.addChunk(fileId, chunk.chunk_index, chunk.message_id, 0);
-                        db.db.prepare('UPDATE chunks SET file_telegram_id = ? WHERE file_id = ? AND chunk_index = ?')
-                            .run(chunk.file_telegram_id, fileId, chunk.chunk_index);
-                    }
+                        for (const chunk of allChunks) {
+                            db.addChunk(
+                                fileId,
+                                chunk.chunk_index,
+                                chunk.message_id,
+                                chunk.size || 0,
+                                chunk.file_telegram_id,
+                                chunk.bot_id || null
+                            );
+                        }
+                        if (existing) db.deleteFileCascade(existing.id);
+                        db.deletePendingUpload(upload.id);
+                    })();
 
-                    // Clean up pending record
-                    db.deletePendingUpload(upload.id);
+                    supersededChunks.push(...existingChunks);
                     if (upload.temp_dir) {
                         try { fs.rmdirSync(upload.temp_dir); } catch (e) { }
                     }
 
                     console.log(chalk.green(`  ✓ Completed: ${upload.filename}`));
+                    completedUploads++;
                 }
             }
 
-            console.log(chalk.green('\n✨ All uploads resumed!\n'));
+            const remainingUploads = db.getPendingUploads().length;
             db.close();
+            let manifestUpdated = completedUploads === 0;
+            if (completedUploads > 0) {
+                try {
+                    await backupRemoteManifest({ dataDir: DATA_DIR, password, config, telegramPool: client });
+                    manifestUpdated = true;
+                    for (const chunk of supersededChunks) {
+                        try { await client.deleteMessage(chunk.message_id, chunk.bot_id || null); } catch { }
+                    }
+                } catch (error) {
+                    console.log(chalk.yellow(`\n⚠ Uploads resumed, but recovery manifest failed: ${error.message}\n`));
+                }
+            }
+            if (remainingUploads === 0) {
+                const suffix = manifestUpdated ? ' and recovery manifest updated' : '; run `tas index backup` to refresh recovery';
+                console.log(chalk.green(`\n✨ All uploads resumed${suffix}!\n`));
+            } else {
+                console.log(chalk.yellow(`\n⚠ ${remainingUploads} upload(s) remain incomplete. Missing staged chunks cannot be resumed.\n`));
+                process.exitCode = 1;
+            }
 
         } catch (err) {
             console.error(chalk.red('Resume failed:'), err.message);
@@ -1208,6 +1715,7 @@ shareCmd
     .option('-e, --expire <duration>', 'Expiry duration (e.g. 1h, 24h, 7d)', '24h')
     .option('-m, --max-downloads <n>', 'Maximum number of downloads', '1')
     .option('--port <port>', 'HTTP server port', '3000')
+    .option('--host <host>', 'HTTP server bind address (default 127.0.0.1; use 0.0.0.0 for LAN)', '127.0.0.1')
     .option('-p, --password <password>', 'Encryption password')
     .action(async (file, options) => {
         console.log(chalk.cyan('\n🔗 Creating share link...\n'));
@@ -1245,7 +1753,8 @@ shareCmd
                 dataDir: DATA_DIR,
                 password,
                 config,
-                port
+                port,
+                host: options.host || '127.0.0.1'
             });
 
             await server.initialize();
@@ -1253,22 +1762,16 @@ shareCmd
 
             spinner.succeed('Share server running!');
 
-            // Get local IP for network sharing
-            const { networkInterfaces } = await import('os');
-            const nets = networkInterfaces();
-            let localIP = 'localhost';
-            for (const name of Object.keys(nets)) {
-                for (const net of nets[name]) {
-                    if (net.family === 'IPv4' && !net.internal) {
-                        localIP = net.address;
-                        break;
-                    }
-                }
-            }
-
             console.log(chalk.cyan('\n📎 Share Links:\n'));
             console.log(`  ${chalk.white('Local:')}    ${chalk.green(`http://localhost:${port}/d/${token}`)}`);
-            console.log(`  ${chalk.white('Network:')}  ${chalk.green(`http://${localIP}:${port}/d/${token}`)}`);
+            if (options.host && options.host !== '127.0.0.1' && options.host !== 'localhost') {
+                console.log(`  ${chalk.white('Network:')}  ${chalk.green(`http://${options.host === '0.0.0.0' ? '<your-lan-ip>' : options.host}:${port}/d/${token}`)}`);
+                if (options.host === '0.0.0.0') {
+                    console.log(chalk.yellow('  ⚠ Bound to all interfaces — anyone on your network can fetch this link until it expires.'));
+                }
+            } else {
+                console.log(chalk.dim('  (LAN sharing disabled — bound to localhost. Re-run with --host 0.0.0.0 to share on your network.)'));
+            }
             console.log();
             console.log(chalk.dim(`  File:       ${fileRecord.filename}`));
             console.log(chalk.dim(`  Expires:    ${options.expire}`));
@@ -1369,7 +1872,8 @@ shareCmd
 program
     .command('doctor')
     .description('🩺 Run self-diagnostics and check system health')
-    .action(async () => {
+    .option('-p, --password <password>', 'Encryption password (to verify every configured Telegram bot)')
+    .action(async (options) => {
         console.log(chalk.cyan('\n🩺 TAS Doctor — System Health Check\n'));
 
         const checks = [];
@@ -1392,11 +1896,19 @@ program
         if (fs.existsSync(configPath)) {
             try {
                 const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-                if (config.configVersion === 2) ok('Config v2 (encrypted token)');
+                if (config.configVersion === 3 && Array.isArray(config.bots)) {
+                    const enabled = config.bots.filter(bot => bot.enabled !== false).length;
+                    ok(`Config v3 (${config.bots.length} bot(s), ${enabled} enabled)`);
+                    if (enabled > 1) warn('Experimental multi-bot mode enabled', MULTI_BOT_WARNING);
+                }
+                else if (config.configVersion === 2) ok('Config v2 (encrypted token)');
                 else if (config.botToken) warn('Config v1 (plaintext token)', 'Re-run `tas init` to encrypt token');
                 else fail('Config invalid', 'Missing bot token');
 
-                if (config.chatId) ok(`Chat ID: ${config.chatId}`);
+                const configuredBots = getBotEntries(config);
+                if (configuredBots.length > 0 && configuredBots.every(bot => bot.chatId !== undefined && bot.chatId !== null)) {
+                    ok(`Storage chats configured: ${configuredBots.length}`);
+                }
                 else fail('Chat ID missing', 'Run `tas init`');
             } catch (e) {
                 fail('Config corrupted', e.message);
@@ -1413,6 +1925,16 @@ program
                 db.init();
                 const stats = db.getStats();
                 ok(`Database: ${stats.file_count} files, ${formatBytes(stats.total_original)} total`);
+                const oversized = db.db.prepare('SELECT COUNT(*) AS count FROM chunks WHERE size > ?')
+                    .get(20 * 1000 * 1000).count;
+                if (oversized > 0) {
+                    warn(
+                        `${oversized} legacy chunk(s) exceed the hosted 20 MB getFile limit`,
+                        'They may require a local Bot API server to recover; new uploads use 19 MiB payloads'
+                    );
+                } else {
+                    ok('Chunk sizes are hosted Bot API round-trip safe');
+                }
                 db.close();
             } catch (e) {
                 fail('Database error', e.message);
@@ -1421,18 +1943,20 @@ program
             warn('Database not found', 'Will be created on first upload');
         }
 
-        // 5. Check FUSE availability
+        // 5. Check the native FUSE stack with a real mount/read/unmount smoke test
         try {
-            await import('fuse-native');
-            ok('FUSE support available');
+            const { checkFuseRuntime } = await import('./fuse/mount.js');
+            const fuse = await checkFuseRuntime();
+            if (fuse.supported) ok('FUSE runtime: mount → readdir → unmount passed');
+            else warn('FUSE mount unavailable', fuse.reason);
         } catch (e) {
-            warn('FUSE not available', 'Install libfuse for mount support');
+            warn('FUSE smoke test failed', e.message);
         }
 
         // 6. Check disk space
         try {
-            const { execSync } = await import('child_process');
-            const df = execSync(`df -h "${DATA_DIR}" 2>/dev/null || echo "unknown"`).toString().trim();
+            const { execFileSync } = await import('child_process');
+            const df = execFileSync('df', ['-h', DATA_DIR], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
             const lines = df.split('\n');
             if (lines.length > 1) {
                 const parts = lines[1].split(/\s+/);
@@ -1447,6 +1971,29 @@ program
         const iterations = 600000;
         ok(`Encryption: AES-256-GCM, PBKDF2-SHA512 ${iterations.toLocaleString()} iterations`);
 
+        // 8. Telegram connectivity (authenticated only when we can decrypt
+        // the token without prompting — never block doctor on a password).
+        try {
+            const cfgRaw = loadConfig(DATA_DIR);
+            const pw = options.password || process.env.TAS_PASSWORD;
+            if (!cfgRaw) {
+                warn('Telegram connectivity not checked', 'Run `tas init` first');
+            } else if (cfgRaw.botToken) {
+                const client = new TelegramClient(DATA_DIR);
+                const me = await client.initialize(cfgRaw.botToken);
+                ok(`Telegram connectivity: OK (@${me.username})`);
+            } else if ((cfgRaw.encryptedBotToken || Array.isArray(cfgRaw.bots)) && pw) {
+                const cfg = resolveConfig(cfgRaw, pw);
+                const client = new TelegramPool(DATA_DIR, cfg.bots);
+                await client.initialize();
+                ok(`Telegram connectivity: ${cfg.bots.length}/${cfg.bots.length} bot(s) OK`);
+            } else {
+                warn('Telegram connectivity not checked', 'Set TAS_PASSWORD or use --password to verify');
+            }
+        } catch (e) {
+            fail('Telegram connectivity failed', e.message);
+        }
+
         // Summary
         const fails = checks.filter(c => c.status === 'fail').length;
         const warns = checks.filter(c => c.status === 'warn').length;
@@ -1458,5 +2005,3 @@ program
     });
 
 program.parse();
-
-

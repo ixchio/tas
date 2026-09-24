@@ -13,8 +13,8 @@ import { parseHeader, HEADER_SIZE } from './chunker.js';
  * Create the download pipeline streams for a file stored in Telegram.
  *
  * @param {object} options
- * @param {object} options.client     – TelegramClient instance (initialized, with chatId set)
- * @param {Array}  options.chunks     – Chunk records from DB, each with { chunk_index, file_telegram_id, size }
+ * @param {object} options.client     – TelegramPool (or compatible single client)
+ * @param {Array}  options.chunks     – Chunk records with { chunk_index, file_telegram_id, bot_id, size }
  * @param {object} options.encryptor  – Encryptor instance
  * @param {object} options.compressor – Compressor instance
  * @param {function} [options.onChunkDownloaded] – Optional callback({ chunkIndex, totalChunks, bytesDownloaded, totalBytes })
@@ -29,7 +29,10 @@ export async function createDownloadPipeline({ client, chunks, encryptor, compre
     const sortedChunks = [...chunks].sort((a, b) => a.chunk_index - b.chunk_index);
 
     // Download the first chunk to inspect the header
-    const firstChunkData = await client.downloadFile(sortedChunks[0].file_telegram_id);
+    const firstChunkData = await client.downloadFile(
+        sortedChunks[0].file_telegram_id,
+        sortedChunks[0].bot_id || null
+    );
     const header = parseHeader(firstChunkData);
 
     const decryptStream = encryptor.getDecryptStream();
@@ -53,7 +56,10 @@ export async function createDownloadPipeline({ client, chunks, encryptor, compre
                     data = preloadedFirst;
                     preloadedFirst = null;
                 } else {
-                    data = await client.downloadFile(sortedChunks[currentIndex].file_telegram_id);
+                    data = await client.downloadFile(
+                        sortedChunks[currentIndex].file_telegram_id,
+                        sortedChunks[currentIndex].bot_id || null
+                    );
                 }
 
                 bytesDownloaded += data.length;

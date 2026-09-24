@@ -9,7 +9,7 @@ import crypto from 'crypto';
 import path from 'path';
 import { pipeline } from 'stream/promises';
 import { FileIndex } from '../db/index.js';
-import { TelegramClient } from '../telegram/client.js';
+import { TelegramPool } from '../telegram/pool.js';
 import { Encryptor } from '../crypto/encryption.js';
 import { Compressor } from '../utils/compression.js';
 import { createDownloadPipeline } from '../utils/download-stream.js';
@@ -253,9 +253,7 @@ export class ShareServer {
         this.db = new FileIndex(path.join(this.dataDir, 'index.db'));
         this.db.init();
 
-        this.client = new TelegramClient(this.dataDir);
-        await this.client.initialize(this.config.botToken);
-        this.client.setChatId(this.config.chatId);
+        this.client = new TelegramPool(this.dataDir, this.config.bots);
 
         this.encryptor = new Encryptor(this.password);
         this.compressor = new Compressor();
@@ -337,9 +335,6 @@ export class ShareServer {
                 return;
             }
 
-            // Increment download count
-            this.db.incrementShareDownload(token);
-
             // Determine content type
             const ext = path.extname(fileRecord.filename).toLowerCase();
             const contentTypes = {
@@ -360,11 +355,14 @@ export class ShareServer {
             res.writeHead(200, {
                 'Content-Type': contentType,
                 'Content-Disposition': `attachment; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(fileRecord.filename)}`,
-                'Transfer-Encoding': 'chunked'
+                'Content-Length': fileRecord.original_size
             });
 
-            // Download the file from Telegram, decrypt, decompress and stream directly to 'res'
+            // Download the file from Telegram, decrypt, decompress and stream directly to 'res'.
+            // Count the download only AFTER a successful stream so an aborted
+            // connection doesn't burn a single-use link.
             await this.streamToResponse(fileRecord, res);
+            this.db.incrementShareDownload(token);
 
         } catch (err) {
             console.error('Share server error:', err.message);

@@ -2,11 +2,11 @@
   <img src="assets/demo.gif" alt="TAS — Telegram as Storage CLI demo" width="680">
 </p>
 
-<h1 align="center">📦 TAS — Telegram as Storage</h1>
+<h1 align="center">📦 TAS</h1>
 
 <h3 align="center">
-  Turn your Telegram bot into unlimited, encrypted cloud storage.<br>
-  <strong>Free forever. Zero-knowledge. No sign-up. No credit card. No limits.</strong>
+  Encrypted file transport for data you already keep backed up.<br>
+  <strong>Local index. Verifiable restores. Explicit provider risk.</strong>
 </h3>
 
 <p align="center">
@@ -18,13 +18,13 @@
   <a href="https://github.com/ixchio/tas/network/members"><img src="https://img.shields.io/github/forks/ixchio/tas?style=social" alt="GitHub Forks"></a>
   <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen?logo=node.js" alt="Node.js >= 18">
   <img src="https://img.shields.io/badge/encryption-AES--256--GCM-blueviolet?logo=shield" alt="AES-256-GCM">
-  <img src="https://img.shields.io/badge/tests-71%20passing-success" alt="71 Tests Passing">
+  <img src="https://img.shields.io/badge/tests-97%20passing-success" alt="97 Tests Passing">
 </p>
 
 <p align="center">
   <a href="QUICKSTART.md"><strong>📚 Quick Start</strong></a> &nbsp;•&nbsp;
   <a href="FAQ.md">FAQ</a> &nbsp;•&nbsp;
-  <a href="#-why-tas">Why TAS?</a> &nbsp;•&nbsp;
+  <a href="#why-tas">Why TAS?</a> &nbsp;•&nbsp;
   <a href="#-features">Features</a> &nbsp;•&nbsp;
   <a href="#-security-model">Security</a> &nbsp;•&nbsp;
   <a href="#-cli-reference">CLI Docs</a> &nbsp;•&nbsp;
@@ -34,30 +34,21 @@
 
 ---
 
-> **TL;DR** — One `npm install`, one `tas init`, then `tas push yourfile.pdf`. Your file is now AES-256 encrypted and stored for free on Telegram's infrastructure. No accounts, no fees, no vendor lock-in. Seriously.
+> **TAS 3.0** — One `npm install`, one `tas init`, then `tas push yourfile.pdf`. TAS encrypts content locally and sends round-trip-safe chunks through the Bot API. It is experimental transport, not a durable backup service: Telegram can limit, remove, or terminate access. Keep an independent backup.
 
 ---
 
-## The Problem With "Free" Cloud Storage
+## What TAS Is
 
-Every major cloud provider has one of three business models: **scanning your data**, **charging you money**, or **capping your storage**. There is no free lunch.
+TAS is a local-first CLI for moving encrypted file blobs through your own Telegram bots. Its SQLite index lives on your machine; content is encrypted before upload; completed mutations publish an encrypted recovery manifest you can use to rebuild the index.
 
-| Provider | Free Tier | Reads Your Data? | CLI-First? | Encryption At Rest (by you)? |
-|---|---|---|---|---|
-| Google Drive | 15 GB | ✅ Yes (indexes for ads) | ❌ | ❌ |
-| Dropbox | 2 GB | ✅ Can access | ❌ | ❌ |
-| iCloud | 5 GB | ✅ Apple ToS | ❌ | ❌ |
-| Mega | 20 GB | ❓ Closed-source E2EE | ❌ | ❓ |
-| Backblaze B2 | 10 GB | ❌ | ✅ | ❌ (you add it) |
-| **TAS + Telegram** | **♾️ Unlimited** | **❌ Impossible (AES-256)** | **✅ First-class** | **✅ Always** |
-
-Meanwhile, Telegram gives every bot **unlimited file storage** via its public Bot API — and almost nobody is using it.
+> **Operating boundary.** TAS is not unlimited storage, a backup guarantee, or a Telegram-supported cloud drive. Telegram provides no TAS quota, retention SLA, recovery service, or account guarantee. Its [Bot Developer Terms](https://telegram.org/tos/bot-developers) also restrict external apps that diverge into cloud-storage use cases. Use TAS only for data that already has an independent backup.
 
 ---
 
-## The Solution
+## How It Works
 
-**TAS** compresses, encrypts (AES-256-GCM), chunks, and uploads your files to your own private Telegram bot chat. Your password never leaves your machine. Telegram only ever sees **encrypted noise**. You get a fully-featured, CLI-native cloud drive with FUSE mount, Dropbox-style sync, expiring share links, and tagging — at **$0/month, forever.**
+**TAS** compresses, encrypts (AES-256-GCM), chunks, and uploads files to private bot chats. Your password stays local. Content, filenames, original sizes, and the recovery manifest are encrypted or omitted from Telegram-visible chunk metadata. Telegram still sees bot/chat identity, timing, chunk count, and encrypted sizes.
 
 ```
   Your Machine                                    Telegram Cloud
@@ -71,14 +62,14 @@ Meanwhile, Telegram gives every bot **unlimited file storage** via its public Bo
 │  (SHA-256 verified)         │←── decomp  ←──│   ← Stream on demand     │
 │                             │               │                          │
 └─────────────────────────────┘               └──────────────────────────┘
-         SQLite Index                              Unlimited & Free
+         SQLite Index                         Remote Bot Messages
 ```
 
 ---
 
 ## ⚡ Quick Start
 
-**Three commands. Under two minutes. Zero cost.**
+**Three commands to try it. Keep another copy of every file.**
 
 ```bash
 # 1. Install globally
@@ -97,36 +88,15 @@ tas list                     # See everything you've stored
 
 ---
 
-## 💡 Why TAS?
+## Why TAS?
 
-<table>
-<tr>
-<td width="50%" valign="top">
+TAS is for people who want a small, inspectable command-line transport rather than another account, dashboard, or opaque sync daemon. It makes the important state visible and keeps the recovery path in your hands.
 
-### ❌ The Alternative
-- Google Drive scans & indexes your files for ads
-- Dropbox costs $12/mo — and can read your data
-- iCloud locks you into the Apple ecosystem
-- Self-hosting (Nextcloud, MinIO) costs VPS money + maintenance time
-- S3 / B2 needs encryption wiring and costs per GB transferred
-- rclone + any backend still needs a paid backend
-
-</td>
-<td width="50%" valign="top">
-
-### ✅ TAS gives you
-- **$0/month** — forever, no storage caps, no bandwidth fees
-- **Zero-knowledge** — only you hold the decryption key
-- **AES-256-GCM** — same cipher used by banks and governments
-- **FUSE mount** — Telegram storage appears as a real folder
-- **Auto-sync** — Dropbox-style folder watcher built-in
-- **Expiring share links** — send files without sharing your password
-- **CLI-first** — pipe to `jq`, run in cron, automate everything
-- **Open source** — audit every single line of crypto code
-
-</td>
-</tr>
-</table>
+- **A local source of truth.** The index is SQLite, paths are exact, and nested directories behave consistently in sync and FUSE.
+- **A recovery story.** TAS writes an authenticated, encrypted remote manifest after completed changes; `tas index rebuild` can restore the file-to-message map when the local index is gone.
+- **A clean automation surface.** Push, pull, search, tags, sync, and JSON output work from a shell, cron job, or CI runner.
+- **Deliberate multi-bot routing.** Each chunk records its owner, so a pool is inspectable and reversible instead of a hidden round-robin trick.
+- **No false promise.** The product is precise about the provider boundary: Telegram is not your storage vendor, and multi-bot mode is not a way around its rules.
 
 ---
 
@@ -143,7 +113,7 @@ cp report.pdf ~/cloud/       # Drop files in — auto-encrypted and uploaded
 tas unmount ~/cloud          # Clean unmount when done
 ```
 
-> **Requirements:** `apt install fuse libfuse-dev` (Linux) · `brew install macfuse` (macOS)
+> **Linux only for this release:** install `fuse`/`libfuse-dev`, then run `tas doctor` for a real mount → readdir → unmount smoke test. macOS mount is explicitly unsupported because `fuse-native@2.x` targets obsolete OSXFUSE APIs and is not validated with current macFUSE or Apple Silicon. Push, pull, sync, and share still work on macOS.
 
 ---
 
@@ -157,6 +127,33 @@ tas sync start                  # Start the watcher (runs in background)
 tas sync pull                   # Pull all synced files back down
 tas sync status                 # See what's queued / synced / pending
 ```
+
+---
+
+### 🤖 Experimental Multi-Bot Pool
+
+TAS can distribute new chunks deterministically across multiple bots and records the owning bot on every chunk. Disabled bots remain configured for reads; a bot cannot be removed while indexed chunks or the recovery manifest depend on it.
+
+```bash
+tas bot add --name archive-2       # Interactive token/chat setup + risk acknowledgement
+tas bot list                       # IDs, state, chat, and dependent chunk counts
+tas bot disable archive-2          # Stop new writes; old chunks remain readable
+tas bot enable archive-2
+tas bot remove archive-2           # Refuses unless no data depends on it
+```
+
+> **Use at your own risk.** Multiple bots do not guarantee more quota, durability, ban avoidance, or Terms compliance. Do not use this feature to evade Telegram limits. All bots remain under Telegram's control, so this is distribution—not redundancy.
+
+### 🧯 Index Recovery
+
+Every completed storage mutation publishes a gzip-compressed, AES-256-GCM-authenticated manifest containing the file/chunk mapping and tags. Ephemeral share tokens are deliberately excluded. The latest pointer is stored in `config.json`.
+
+```bash
+tas index backup                 # Publish a fresh encrypted recovery point
+tas index rebuild               # Authenticate and rebuild index.db
+```
+
+Keep `config.json` and your password separately: recovery cannot discover the latest manifest if both the database and config are lost.
 
 ---
 
@@ -192,11 +189,12 @@ tas search -t secrets           # Quickly find your credentials
 ```bash
 tas doctor
 # ✓ Node.js 20.11.0
-# ✓ Config v2 (encrypted bot token — AES-256-GCM at rest)
+# ✓ Config v3 (encrypted multi-bot token set)
 # ✓ Database: 42 files, 1.3 GB total across 28 chunks
 # ✓ Disk space: 50 GB free (32% used)
 # ✓ Encryption: AES-256-GCM · PBKDF2-SHA512 · 600,000 iterations (OWASP 2025)
-# ✓ Telegram connectivity: OK
+# ✓ FUSE runtime: mount → readdir → unmount passed (Linux)
+# ✓ Telegram connectivity: 2/2 bots OK
 # ✨ All systems go!
 ```
 
@@ -272,7 +270,7 @@ jobs:
 
 ## 🛡️ Security Model
 
-TAS implements **zero-knowledge encryption** — we can't read your data, Telegram can't read your data, and nobody without your password ever can.
+TAS applies **client-side authenticated encryption**. TAS has no hosted service that receives your password, but this is not a formal zero-knowledge protocol and it does not hide all traffic metadata from Telegram.
 
 | Layer | Implementation | Standard |
 |---|---|---|
@@ -281,45 +279,47 @@ TAS implements **zero-knowledge encryption** — we can't read your data, Telegr
 | **Salt** | 32 bytes, `crypto.randomBytes()` — unique per file | No rainbow tables |
 | **IV/Nonce** | 12 bytes, `crypto.randomBytes()` — unique per file | No nonce reuse |
 | **Auth Tag** | 16 bytes GCM tag — any tampered bit = instant rejection | Tamper detection |
-| **Bot Token** | Encrypted at rest in `config.json` (AES-256-GCM) | Config v2 |
+| **Bot Tokens** | Encrypted independently at rest in `config.json` | Config v3 |
 | **Password Verification** | `crypto.timingSafeEqual()` on both PBKDF2 and legacy paths | Timing-safe |
 | **Config Permissions** | `chmod 600 config.json` on creation | No world-readable secrets |
-| **Integrity** | SHA-256 hash verified on every single download | Bit-perfect guarantee |
+| **Recovery Manifest** | gzip + AES-256-GCM; authenticated before SQLite import | Remote index recovery |
+| **Integrity** | SHA-256 hash verified on completed downloads | Detects mismatch/corruption |
 | **Share Server** | Binds `127.0.0.1` by default, XSS-escaped, RFC 6266 filenames | LAN-safe |
 
 ### What Telegram Actually Sees
 
 ```
-📦  a7f3b2c1e9d4f820.tas  —  12.4 MB  —  application/octet-stream
+chunk-000000.tas  —  12.4 MB  —  caption: tas:c1:42:1/2
 ```
 
-An opaque, encrypted blob. No filename. No content type. No metadata. Just noise.
+New uploads expose no user filename or original size in the document name, caption, or public WAS1 routing header. Telegram can still observe encrypted size, chunk count, timing, bot/chat identity, IP/network data, and message identifiers. Files uploaded by TAS 2.5 and older may still expose filename/size metadata until re-uploaded.
 
 ### Threat Model
 
 | Threat | Mitigated? | How |
 |---|---|---|
-| Telegram reads your files | ✅ Yes | AES-256-GCM — mathematically impossible without key |
-| Someone steals your config.json | ✅ Yes | Bot token encrypted at rest; password hash is PBKDF2 |
-| Brute-force your password | ✅ Yes | 600k PBKDF2 iterations ≈ 100ms/attempt minimum |
-| Tampered download | ✅ Yes | SHA-256 check + GCM auth tag on every download |
-| Timing attack on password | ✅ Yes | `crypto.timingSafeEqual()` on all comparisons |
-| Share link exposure | ✅ Yes | Localhost-only by default; expiry + download limits |
+| Telegram reads plaintext content | Mitigated | AES-256-GCM, assuming a strong password and uncompromised client |
+| Telegram observes traffic metadata | Not mitigated | Bot/chat, timing, encrypted sizes, and chunk counts remain visible |
+| Someone steals `config.json` | Partly mitigated | Tokens are encrypted; an offline password attack is still possible |
+| Tampered download | Mitigated | GCM authentication plus final SHA-256 verification |
+| Local machine compromise | Not mitigated | A process with password/filesystem access can read plaintext and tokens |
+| Share link exposure | Limited | Localhost default, expiry, and download limits; the local server decrypts content |
 
 ---
 
 ## 🔄 Reliability
 
-Built with the same philosophy as professional backup tools (restic, borg, rclone):
+Reliability mechanisms implemented by TAS (not an SLA):
 
 | Feature | Implementation |
 |---|---|
 | **Exponential Backoff** | Auto-retry with jitter on Telegram 429 errors and network timeouts |
-| **Rate Limiting** | Built-in 1 msg/sec — never trips Telegram's rate limits |
+| **Rate Limiting** | One serialized send queue per configured bot within a TAS process; parallel TAS processes and Telegram's dynamic limits still apply |
 | **Integrity Verification** | SHA-256 hash verified after every single download |
-| **Resume Uploads** | `tas resume` picks up interrupted multi-chunk uploads |
-| **Graceful Shutdown** | SIGINT/SIGTERM handled — zero corruption risk on Ctrl-C |
-| **Self-Diagnostics** | `tas doctor` validates your entire setup end-to-end |
+| **Resume Uploads** | Network-stage chunks are staged on disk and persisted in `pending_uploads`; `tas resume` continues them |
+| **Index Recovery** | Authenticated encrypted remote manifest; `tas index rebuild` restores file/chunk ownership |
+| **Graceful Shutdown** | SIGINT/SIGTERM handled; staged chunks and SQLite WAL reduce partial-state risk |
+| **Self-Diagnostics** | Checks config/database/chunk limits, all bots, and a real Linux FUSE smoke mount |
 
 ---
 
@@ -329,16 +329,20 @@ Built with the same philosophy as professional backup tools (restic, borg, rclon
 <summary><strong>Core Commands</strong></summary>
 
 ```bash
-tas init                          # 🚀 Interactive setup wizard (create bot in ~60s)
-tas push <file> [file2...]        # ⬆️  Encrypt + compress + upload
+tas init [--token T --chat ID --password PW]  # 🚀 Wizard, or fully non-interactive for CI/Docker
+tas push <files...>               # ⬆️  Encrypt + compress + upload (batch supported)
 tas pull <file|hash>              # ⬇️  Download + decrypt + verify
 tas list [-l] [--json]            # 📋 List all stored files
 tas delete <file|hash>            # 🗑️  Remove from index (--hard removes from Telegram)
 tas status [--json]               # 📊 Storage stats & database health
 tas search <query> [-t tag]       # 🔍 Find by filename or tag
 tas resume                        # 🔄 Resume interrupted uploads
-tas verify                        # ✅ Verify every file still exists and is intact
+tas verify                        # ✅ Check every Telegram file reference
+tas verify --deep                 # ✅ Download/decrypt/hash every file (slow and bandwidth-heavy)
 tas doctor                        # 🩺 Full system health check
+tas index backup                  # 🧯 Publish encrypted recovery manifest
+tas index rebuild                 # 🧯 Restore index.db from that manifest
+tas bot add|list|enable|disable|remove  # 🤖 Manage experimental bot pool
 ```
 
 </details>
@@ -347,7 +351,7 @@ tas doctor                        # 🩺 Full system health check
 <summary><strong>Mount & Sync</strong></summary>
 
 ```bash
-# FUSE Mount
+# FUSE Mount (Linux only in this release)
 tas mount <path>                  # Mount Telegram storage as a local folder
 tas unmount <path>                # Clean unmount
 
@@ -365,7 +369,7 @@ tas sync status                   # Show sync queue and status
 
 ```bash
 # Expiring Share Links
-tas share create <file> [--expire 1h|24h|7d] [--max-downloads N]
+tas share create <file> [--expire 1h|24h|7d] [--max-downloads N] [--host 0.0.0.0] [--port 3000]
 tas share list                    # Active links with expiry countdown
 tas share revoke <token>          # Instantly revoke a share
 
@@ -395,12 +399,14 @@ TAS_DATA_DIR="/custom/path" # Override default ~/.tas data directory
 src/
 ├── cli.js                    # Commander-based CLI — all commands defined here
 ├── index.js                  # Core streaming upload/download pipeline
+├── manifest.js               # Encrypted remote index backup/rebuild
 ├── crypto/
 │   └── encryption.js         # AES-256-GCM + PBKDF2-SHA512 (600k iterations)
 ├── db/
 │   └── index.js              # SQLite index: files, chunks, tags, shares, sync
 ├── telegram/
-│   └── client.js             # Bot API wrapper — retry, rate-limit, streaming
+│   ├── client.js             # Bot API wrapper — retry + serialized send queue
+│   └── pool.js               # Stable per-chunk multi-bot routing
 ├── fuse/
 │   └── mount.js              # FUSE filesystem — mount Telegram as a local folder
 ├── share/
@@ -410,7 +416,8 @@ src/
 └── utils/
     ├── download-stream.js     # Shared Telegram→Decrypt→Decompress pipeline
     ├── compression.js         # Smart gzip (skips already-compressed formats)
-    ├── chunker.js             # 49 MB chunks + WAS1 binary file headers
+    ├── chunker.js             # 19 MiB payloads + metadata-free public WAS1 headers
+    ├── logical-path.js        # Portable exact paths + virtual directory tree
     ├── progress.js            # Terminal progress bars with MB/s + ETA
     ├── throttle.js            # Bandwidth limiter (stream transform)
     ├── branding.js            # ASCII art + version display
@@ -434,24 +441,17 @@ src/
 | 💾 **Offsite backup** | Nightly database dumps, system configs via cron |
 | 🤖 **CI/CD artifacts** | Store build outputs, test reports, deployment keys |
 
-**Not ideal for:** Mission-critical business data (use professional backup tools alongside this), team collaboration (no multi-user support yet), or replacing full backup systems — **Telegram can theoretically delete old messages.**
+**Not appropriate for:** the only copy of any data, mission-critical/business backups, regulated retention, team storage, or workloads that require an SLA. Telegram can remove messages or terminate access without giving TAS a recovery channel.
 
 ---
 
 ## ❓ Is This Allowed? (The Legal Question)
 
-### Will Telegram ban me?
+### Can Telegram restrict or terminate this use?
 
-**No.** Here's the complete picture:
+**Yes.** The Bot API supports sending documents, but that technical capability is not permission or a storage guarantee. Telegram's current [Bot Developer Terms](https://telegram.org/tos/bot-developers) explicitly restrict external applications that diverge into cloud-storage use cases, prohibit circumventing rate limits, and allow bot/account termination. TAS cannot promise that one bot—or a multi-bot pool—will remain available.
 
-- ✅ **Bot API is a public, documented feature** — Telegram designed file uploads into the Bot API intentionally
-- ✅ **You're sending to your own private bot chat** — not a public channel, not spamming
-- ✅ **Content is encrypted** — Telegram cannot detect what you're storing
-- ✅ **No published storage limits** — individual files cap at 2 GB (TAS chunks automatically)
-- ✅ **Strong precedent** — thousands of file-sharing bots, backup tools, and media archives use this API
-- ⚠️ **Worst case** — Telegram might prune old messages to free infrastructure space. They won't ban you for using a documented API
-
-**Your responsibility:** Don't store illegal content. Telegram's ToS prohibits copyright infringement, malware, CSAM, etc. Use responsibly. See [FAQ.md](FAQ.md) for the full legal breakdown.
+Use TAS only at your own risk, do not use multiple bots to evade limits, follow all applicable laws and Telegram terms, and keep a tested independent backup. Encryption protects content confidentiality; it does not make the usage invisible or policy-compliant.
 
 ---
 
@@ -460,9 +460,10 @@ src/
 | | |
 |---|---|
 | 📌 **Not a replacement for backups** | Telegram can purge old messages. Use TAS alongside, not instead of, real backup solutions. |
-| 📌 **49 MB chunk size** | Files are split automatically — fully transparent to you. Telegram's Bot API limit is 50 MB. |
-| 📌 **Single-user** | Designed for personal use. No multi-tenant or shared-account support. |
-| 📌 **FUSE = Linux/macOS only** | Mount requires `libfuse`. The CLI itself works anywhere Node.js 18+ runs. |
+| 📌 **19 MiB payload chunks** | Hosted Bot API uploads permit more, but `getFile` documents only 20 MB downloads. TAS stays below the read limit. |
+| 📌 **Multi-bot is experimental** | It distributes chunks and preserves ownership mapping; it is not redundancy or ban protection. |
+| 📌 **FUSE = Linux only for now** | macOS mount is disabled until a maintained modern macFUSE backend and macOS CI exist. |
+| 📌 **Recovery needs config** | `index.db` can be rebuilt from the encrypted manifest only if `config.json`, password, manifest message, and owning bot survive. |
 | 📌 **No versioning (yet)** | Overwriting a file replaces the previous version. |
 | 📌 **Internet required** | Telegram-backed — offline access requires files pulled locally first. |
 
@@ -474,7 +475,7 @@ src/
 git clone https://github.com/ixchio/tas
 cd tas && npm install
 
-npm test               # Run all 71 tests (encryption, WAS1 headers, tags, sync, shares)
+npm test               # Run all 97 tests (crypto, paths, migrations, multi-bot, resume, manifest, sync, shares)
 npm test -- --watch    # Watch mode for active development
 ```
 

@@ -61,18 +61,32 @@ export function validateConfig(config) {
         return { valid: false, errors };
     }
 
-    // v2: encrypted token, v1: plaintext token
-    const hasToken = config.encryptedBotToken || config.botToken;
-    if (!hasToken) {
-        errors.push('Missing bot token (botToken or encryptedBotToken)');
+    const bots = getBotEntries(config);
+    if (bots.length === 0) errors.push('Missing bot configuration');
+
+    const seenIds = new Set();
+    for (const bot of bots) {
+        if (!bot.id || !/^[a-z0-9][a-z0-9_-]{0,31}$/i.test(bot.id)) {
+            errors.push(`Invalid bot id: ${bot.id || '(missing)'}`);
+        } else if (seenIds.has(bot.id)) {
+            errors.push(`Duplicate bot id: ${bot.id}`);
+        }
+        seenIds.add(bot.id);
+
+        if (!bot.encryptedBotToken && !bot.botToken) {
+            errors.push(`Missing token for bot ${bot.id || '(unknown)'}`);
+        }
+        if (bot.botToken && !bot.botToken.includes(':')) {
+            errors.push(`Invalid token format for bot ${bot.id || '(unknown)'}`);
+        }
+        if (bot.chatId === undefined || bot.chatId === null ||
+            (typeof bot.chatId !== 'number' && typeof bot.chatId !== 'string')) {
+            errors.push(`Missing or invalid chatId for bot ${bot.id || '(unknown)'}`);
+        }
     }
 
-    if (config.botToken && !config.botToken.includes(':')) {
-        errors.push('Invalid bot token format (should contain :)');
-    }
-
-    if (!config.chatId || (typeof config.chatId !== 'number' && typeof config.chatId !== 'string')) {
-        errors.push('Missing or invalid chatId');
+    if (bots.length > 0 && !bots.some(bot => bot.enabled !== false)) {
+        errors.push('At least one bot must be enabled');
     }
 
     if (!config.passwordHash || typeof config.passwordHash !== 'string') {
@@ -83,6 +97,35 @@ export function validateConfig(config) {
         valid: errors.length === 0,
         errors
     };
+}
+
+/**
+ * Return normalized raw bot entries. v1/v2 configs are represented as one
+ * stable `primary` bot so existing vaults require no migration to keep working.
+ */
+export function getBotEntries(config) {
+    if (!config) return [];
+    if (Array.isArray(config.bots)) {
+        return config.bots.map((bot, index) => ({
+            ...bot,
+            id: bot.id || (index === 0 ? 'primary' : `bot-${index + 1}`),
+            enabled: bot.enabled !== false
+        }));
+    }
+
+    if (config.encryptedBotToken || config.botToken) {
+        return [{
+            id: 'primary',
+            encryptedBotToken: config.encryptedBotToken,
+            botToken: config.botToken,
+            chatId: config.chatId,
+            username: config.username,
+            enabled: true,
+            createdAt: config.createdAt
+        }];
+    }
+
+    return [];
 }
 
 /**
@@ -106,6 +149,20 @@ export function decryptBotToken(config, password) {
     }
 
     throw new Error('No bot token found in config');
+}
+
+/** Decrypt one normalized bot entry. */
+export function decryptBotEntry(bot, password) {
+    return {
+        ...bot,
+        botToken: decryptBotToken(bot, password)
+    };
+}
+
+/** Encrypt a bot token with the vault password. */
+export function encryptBotToken(token, password) {
+    const encryptor = new Encryptor(password);
+    return encryptor.encrypt(Buffer.from(token, 'utf-8')).toString('base64');
 }
 
 /**
@@ -176,8 +233,31 @@ export async function getAndVerifyPassword(passwordOption, dataDir) {
  * @returns {Object} - Config with decrypted botToken
  */
 export function resolveConfig(config, password) {
+    // Reuse one derived key across the pool; deriving PBKDF2 separately for
+    // every bot made startup scale linearly with the number of configured bots.
+    const encryptor = new Encryptor(password);
+    const bots = getBotEntries(config).map(bot => ({
+        ...bot,
+        botToken: bot.botToken || encryptor.decrypt(Buffer.from(bot.encryptedBotToken, 'base64')).toString('utf-8')
+    }));
+    const primary = bots.find(bot => bot.id === 'primary') || bots[0];
+
     return {
         ...config,
-        botToken: decryptBotToken(config, password)
+        bots,
+        // Keep these aliases for third-party callers that still consume the
+        // v1/v2 shape. New code routes through `bots` and persists bot IDs.
+        botToken: primary.botToken,
+        chatId: primary.chatId,
+        username: primary.username
     };
+}
+
+/** Write config atomically enough for this local CLI and restore mode 0600. */
+export function saveConfig(dataDir, config) {
+    const configPath = path.join(dataDir, 'config.json');
+    const tempPath = `${configPath}.tmp`;
+    fs.writeFileSync(tempPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+    fs.renameSync(tempPath, configPath);
+    try { fs.chmodSync(configPath, 0o600); } catch { /* ignore on Windows */ }
 }

@@ -14,7 +14,7 @@ export const LOGO = `
 `;
 
 export const TAGLINE = 'Telegram as Storage';
-export const VERSION = '2.4.1';
+export const VERSION = '3.0.0';
 
 /**
  * Print the TAS banner
@@ -22,7 +22,7 @@ export const VERSION = '2.4.1';
 export function printBanner() {
     console.log(chalk.cyan(LOGO));
     console.log(chalk.dim(`  ${TAGLINE} v${VERSION}`));
-    console.log(chalk.dim('  Free • Encrypted • Unlimited\n'));
+    console.log(chalk.dim('  Experimental • Encrypted • Local-first\n'));
 }
 
 /**

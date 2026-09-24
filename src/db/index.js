@@ -20,13 +20,18 @@ export class FileIndex {
 
     // Enable WAL mode for better concurrent access
     this.db.pragma('journal_mode = WAL');
+    // Enforce foreign keys so ON DELETE CASCADE actually works
+    // (SQLite disables FK enforcement by default per connection)
+    this.db.pragma('foreign_keys = ON');
+    // Don't fail instantly when sync workers write concurrently
+    this.db.pragma('busy_timeout = 5000');
 
     // Create files table
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS files (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         filename TEXT NOT NULL,
-        hash TEXT UNIQUE NOT NULL,
+        hash TEXT NOT NULL,
         original_size INTEGER NOT NULL,
         stored_size INTEGER NOT NULL,
         chunks INTEGER NOT NULL DEFAULT 1,
@@ -39,6 +44,8 @@ export class FileIndex {
       CREATE INDEX IF NOT EXISTS idx_files_hash ON files(hash);
     `);
 
+    this._removeLegacyUniqueHashConstraint();
+
     // Create chunks table (for multi-part files)
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS chunks (
@@ -47,11 +54,13 @@ export class FileIndex {
         chunk_index INTEGER NOT NULL,
         message_id TEXT NOT NULL,
         file_telegram_id TEXT,
+        bot_id TEXT,
         size INTEGER NOT NULL,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE,
         UNIQUE(file_id, chunk_index)
       );
+
     `);
 
     // Create tags table for file organization
@@ -116,11 +125,12 @@ export class FileIndex {
         file_path TEXT NOT NULL,
         hash TEXT NOT NULL,
         original_size INTEGER NOT NULL,
+        stored_size INTEGER NOT NULL DEFAULT 0,
+        compressed INTEGER NOT NULL DEFAULT 0,
         total_chunks INTEGER NOT NULL,
         uploaded_chunks INTEGER NOT NULL DEFAULT 0,
         temp_dir TEXT,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        UNIQUE(hash)
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
 
       CREATE TABLE IF NOT EXISTS pending_chunks (
@@ -131,10 +141,126 @@ export class FileIndex {
         uploaded INTEGER NOT NULL DEFAULT 0,
         message_id TEXT,
         file_telegram_id TEXT,
+        bot_id TEXT,
+        size INTEGER NOT NULL DEFAULT 0,
         FOREIGN KEY (pending_id) REFERENCES pending_uploads(id) ON DELETE CASCADE,
         UNIQUE(pending_id, chunk_index)
       );
     `);
+
+    // Online migration for databases created before multi-bot support.
+    // NULL means the legacy `primary` bot and is intentionally not rewritten.
+    const chunkColumns = this.db.pragma('table_info(chunks)').map(column => column.name);
+    if (!chunkColumns.includes('bot_id')) {
+      this.db.exec('ALTER TABLE chunks ADD COLUMN bot_id TEXT');
+    }
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_chunks_bot_id ON chunks(bot_id)');
+    const pendingChunkColumns = this.db.pragma('table_info(pending_chunks)').map(column => column.name);
+    if (!pendingChunkColumns.includes('bot_id')) {
+      this.db.exec('ALTER TABLE pending_chunks ADD COLUMN bot_id TEXT');
+    }
+    if (!pendingChunkColumns.includes('size')) {
+      this.db.exec('ALTER TABLE pending_chunks ADD COLUMN size INTEGER NOT NULL DEFAULT 0');
+    }
+    const pendingUploadColumns = this.db.pragma('table_info(pending_uploads)').map(column => column.name);
+    if (!pendingUploadColumns.includes('stored_size')) {
+      this.db.exec('ALTER TABLE pending_uploads ADD COLUMN stored_size INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!pendingUploadColumns.includes('compressed')) {
+      this.db.exec('ALTER TABLE pending_uploads ADD COLUMN compressed INTEGER NOT NULL DEFAULT 0');
+    }
+    this._removeLegacyPendingHashConstraint();
+  }
+
+  /**
+   * v1-v2.5 made content hashes UNIQUE, which prevented the same bytes from
+   * being stored at two logical paths and could orphan FUSE uploads. Rebuild
+   * only legacy tables that still carry that constraint.
+   */
+  _removeLegacyUniqueHashConstraint() {
+    const hasUniqueHash = this.db.pragma('index_list(files)').some(index => {
+      if (!index.unique) return false;
+      const columns = this.db.pragma(`index_info('${index.name.replaceAll("'", "''")}')`);
+      return columns.length === 1 && columns[0].name === 'hash';
+    });
+    if (!hasUniqueHash) return;
+
+    this.db.pragma('foreign_keys = OFF');
+    this.db.pragma('legacy_alter_table = ON');
+    try {
+      this.db.exec(`
+        BEGIN;
+        ALTER TABLE files RENAME TO files_legacy_unique_hash;
+        CREATE TABLE files (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          filename TEXT NOT NULL,
+          hash TEXT NOT NULL,
+          original_size INTEGER NOT NULL,
+          stored_size INTEGER NOT NULL,
+          chunks INTEGER NOT NULL DEFAULT 1,
+          compressed INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO files
+          (id, filename, hash, original_size, stored_size, chunks, compressed, created_at, updated_at)
+        SELECT id, filename, hash, original_size, stored_size, chunks, compressed, created_at, updated_at
+        FROM files_legacy_unique_hash;
+        DROP TABLE files_legacy_unique_hash;
+        CREATE INDEX IF NOT EXISTS idx_files_filename ON files(filename);
+        CREATE INDEX IF NOT EXISTS idx_files_hash ON files(hash);
+        COMMIT;
+      `);
+    } catch (error) {
+      try { this.db.exec('ROLLBACK'); } catch { }
+      throw error;
+    } finally {
+      this.db.pragma('legacy_alter_table = OFF');
+      this.db.pragma('foreign_keys = ON');
+    }
+  }
+
+  _removeLegacyPendingHashConstraint() {
+    const hasUniqueHash = this.db.pragma('index_list(pending_uploads)').some(index => {
+      if (!index.unique) return false;
+      const columns = this.db.pragma(`index_info('${index.name.replaceAll("'", "''")}')`);
+      return columns.length === 1 && columns[0].name === 'hash';
+    });
+    if (!hasUniqueHash) return;
+
+    this.db.pragma('foreign_keys = OFF');
+    this.db.pragma('legacy_alter_table = ON');
+    try {
+      this.db.exec(`
+        BEGIN;
+        ALTER TABLE pending_uploads RENAME TO pending_uploads_legacy_unique_hash;
+        CREATE TABLE pending_uploads (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          filename TEXT NOT NULL,
+          file_path TEXT NOT NULL,
+          hash TEXT NOT NULL,
+          original_size INTEGER NOT NULL,
+          stored_size INTEGER NOT NULL DEFAULT 0,
+          compressed INTEGER NOT NULL DEFAULT 0,
+          total_chunks INTEGER NOT NULL,
+          uploaded_chunks INTEGER NOT NULL DEFAULT 0,
+          temp_dir TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO pending_uploads
+          (id, filename, file_path, hash, original_size, stored_size, compressed, total_chunks, uploaded_chunks, temp_dir, created_at)
+        SELECT id, filename, file_path, hash, original_size, stored_size, compressed, total_chunks, uploaded_chunks, temp_dir, created_at
+        FROM pending_uploads_legacy_unique_hash;
+        DROP TABLE pending_uploads_legacy_unique_hash;
+        COMMIT;
+      `);
+    } catch (error) {
+      try { this.db.exec('ROLLBACK'); } catch { }
+      throw error;
+    } finally {
+      this.db.pragma('legacy_alter_table = OFF');
+      this.db.pragma('foreign_keys = ON');
+    }
   }
 
   /**
@@ -161,13 +287,35 @@ export class FileIndex {
   /**
    * Add chunk metadata
    */
-  addChunk(fileId, chunkIndex, messageId, size) {
+  addChunk(fileId, chunkIndex, messageId, size, fileTelegramId = null, botId = null) {
     const stmt = this.db.prepare(`
-      INSERT INTO chunks (file_id, chunk_index, message_id, size)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO chunks (file_id, chunk_index, message_id, size, file_telegram_id, bot_id)
+      VALUES (?, ?, ?, ?, ?, ?)
     `);
 
-    stmt.run(fileId, chunkIndex, messageId, size);
+    stmt.run(fileId, chunkIndex, messageId, size, fileTelegramId, botId);
+  }
+
+  /** Number of chunks that depend on a configured bot. */
+  countChunksByBot(botId) {
+    if (botId === 'primary') {
+      return this.db.prepare(`
+        SELECT COUNT(*) AS count FROM chunks WHERE bot_id = ? OR bot_id IS NULL
+      `).get(botId).count;
+    }
+    return this.db.prepare('SELECT COUNT(*) AS count FROM chunks WHERE bot_id = ?').get(botId).count;
+  }
+
+  countPendingChunksByBot(botId) {
+    if (botId === 'primary') {
+      return this.db.prepare(`
+        SELECT COUNT(*) AS count FROM pending_chunks
+        WHERE uploaded = 1 AND (bot_id = ? OR bot_id IS NULL)
+      `).get(botId).count;
+    }
+    return this.db.prepare(`
+      SELECT COUNT(*) AS count FROM pending_chunks WHERE uploaded = 1 AND bot_id = ?
+    `).get(botId).count;
   }
 
   /**
@@ -178,25 +326,70 @@ export class FileIndex {
   }
 
   /**
-   * Find file by hash (exact match or prefix match)
+   * Find file by hash (exact match preferred, then prefix match)
    */
   findByHash(hash) {
+    const exact = this.db.prepare('SELECT * FROM files WHERE hash = ?').get(hash);
+    if (exact) return exact;
+
     const stmt = this.db.prepare(`
-      SELECT * FROM files WHERE hash = ? OR hash LIKE ? ESCAPE '\\'
+      SELECT * FROM files WHERE hash LIKE ? ESCAPE '\\'
     `);
 
-    return stmt.get(hash, this._escapeLike(hash) + '%');
+    return stmt.get(this._escapeLike(hash) + '%');
   }
 
   /**
-   * Find file by filename (exact match or substring match)
+   * Find file by filename (exact match preferred, then substring match)
+   * Preferring exact matches avoids returning an arbitrary row when
+   * duplicate filenames exist in the index.
    */
   findByName(filename) {
+    const exact = this.db.prepare('SELECT * FROM files WHERE filename = ?').get(filename);
+    if (exact) return exact;
+
     const stmt = this.db.prepare(`
-      SELECT * FROM files WHERE filename = ? OR filename LIKE ? ESCAPE '\\'
+      SELECT * FROM files WHERE filename LIKE ? ESCAPE '\\'
     `);
 
-    return stmt.get(filename, '%' + this._escapeLike(filename) + '%');
+    return stmt.get('%' + this._escapeLike(filename) + '%');
+  }
+
+  /** Exact logical-path lookup. Required by FUSE; never falls back to LIKE. */
+  findByExactName(filename) {
+    return this.db.prepare('SELECT * FROM files WHERE filename = ? ORDER BY id DESC LIMIT 1').get(filename);
+  }
+
+  /**
+   * Find files whose chunk rows don't match the expected chunk count.
+   * These are leftovers from interrupted uploads (see processFile cleanup).
+   * Used by `tas resume` to offer cleanup/retry.
+   */
+  getIncompleteUploads() {
+    const stmt = this.db.prepare(`
+      SELECT f.*, COUNT(c.id) as actual_chunks
+      FROM files f
+      LEFT JOIN chunks c ON c.file_id = f.id
+      GROUP BY f.id
+      HAVING actual_chunks != f.chunks OR f.stored_size = 0
+    `);
+    return stmt.all();
+  }
+
+  /**
+   * Delete a file and all its chunk rows explicitly.
+   * Explicit deletes keep things correct even on connections
+   * where FK enforcement was not enabled (older DBs).
+   */
+  deleteFileCascade(fileId) {
+    const delChunks = this.db.prepare('DELETE FROM chunks WHERE file_id = ?');
+    delChunks.run(fileId);
+    const delTags = this.db.prepare('DELETE FROM tags WHERE file_id = ?');
+    try { delTags.run(fileId); } catch { /* tags table may not exist on very old DBs */ }
+    const delShares = this.db.prepare('DELETE FROM shares WHERE file_id = ?');
+    try { delShares.run(fileId); } catch { /* ignore */ }
+    const stmt = this.db.prepare('DELETE FROM files WHERE id = ?');
+    stmt.run(fileId);
   }
 
   /**
@@ -251,6 +444,94 @@ export class FileIndex {
     `);
 
     return stmt.get();
+  }
+
+  /** Export only durable storage metadata required to rebuild the local index. */
+  exportManifest({ includeShares = false } = {}) {
+    const files = this.db.prepare('SELECT * FROM files ORDER BY id').all();
+    const chunks = this.db.prepare('SELECT * FROM chunks ORDER BY file_id, chunk_index').all();
+    const tags = this.db.prepare('SELECT file_id, tag, created_at FROM tags ORDER BY file_id, tag').all();
+    const manifest = {
+      schemaVersion: 1,
+      createdAt: new Date().toISOString(),
+      files,
+      chunks,
+      tags
+    };
+    if (includeShares) manifest.shares = this.db.prepare('SELECT * FROM shares ORDER BY id').all();
+    return manifest;
+  }
+
+  /** Replace storage metadata from a validated decrypted remote manifest. */
+  importManifest(manifest) {
+    if (!manifest || manifest.schemaVersion !== 1 || !Array.isArray(manifest.files) || !Array.isArray(manifest.chunks)) {
+      throw new Error('Unsupported or malformed TAS manifest');
+    }
+
+    const insertFile = this.db.prepare(`
+      INSERT INTO files
+        (id, filename, hash, original_size, stored_size, chunks, compressed, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const insertChunk = this.db.prepare(`
+      INSERT INTO chunks
+        (id, file_id, chunk_index, message_id, file_telegram_id, bot_id, size, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const insertTag = this.db.prepare(`
+      INSERT OR IGNORE INTO tags (file_id, tag, created_at) VALUES (?, ?, ?)
+    `);
+    const insertShare = this.db.prepare(`
+      INSERT INTO shares
+        (id, file_id, token, expires_at, max_downloads, download_count, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    this.db.transaction(() => {
+      if (Array.isArray(manifest.shares)) this.db.prepare('DELETE FROM shares').run();
+      this.db.prepare('DELETE FROM tags').run();
+      this.db.prepare('DELETE FROM chunks').run();
+      this.db.prepare('DELETE FROM files').run();
+      for (const file of manifest.files) {
+        insertFile.run(
+          file.id,
+          file.filename,
+          file.hash,
+          file.original_size,
+          file.stored_size,
+          file.chunks,
+          file.compressed,
+          file.created_at,
+          file.updated_at
+        );
+      }
+      for (const chunk of manifest.chunks) {
+        insertChunk.run(
+          chunk.id,
+          chunk.file_id,
+          chunk.chunk_index,
+          chunk.message_id,
+          chunk.file_telegram_id,
+          chunk.bot_id || null,
+          chunk.size,
+          chunk.created_at
+        );
+      }
+      for (const tag of manifest.tags || []) {
+        insertTag.run(tag.file_id, tag.tag, tag.created_at);
+      }
+      for (const share of manifest.shares || []) {
+        insertShare.run(
+          share.id,
+          share.file_id,
+          share.token,
+          share.expires_at,
+          share.max_downloads,
+          share.download_count,
+          share.created_at
+        );
+      }
+    })();
   }
 
   // ============== TAG METHODS ==============
@@ -436,14 +717,16 @@ export class FileIndex {
   addPendingUpload(data) {
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO pending_uploads 
-      (filename, file_path, hash, original_size, total_chunks, uploaded_chunks, temp_dir)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      (filename, file_path, hash, original_size, stored_size, compressed, total_chunks, uploaded_chunks, temp_dir)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
       data.filename,
       data.filePath,
       data.hash,
       data.originalSize,
+      data.storedSize || 0,
+      data.compressed ? 1 : 0,
       data.totalChunks,
       data.uploadedChunks || 0,
       data.tempDir
@@ -454,27 +737,27 @@ export class FileIndex {
   /**
    * Add a pending chunk
    */
-  addPendingChunk(pendingId, chunkIndex, chunkPath) {
+  addPendingChunk(pendingId, chunkIndex, chunkPath, size = 0) {
     const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO pending_chunks (pending_id, chunk_index, chunk_path, uploaded)
-      VALUES (?, ?, ?, 0)
+      INSERT OR REPLACE INTO pending_chunks (pending_id, chunk_index, chunk_path, size, uploaded)
+      VALUES (?, ?, ?, ?, 0)
     `);
-    stmt.run(pendingId, chunkIndex, chunkPath);
+    stmt.run(pendingId, chunkIndex, chunkPath, size);
   }
 
   /**
    * Mark chunk as uploaded
    */
-  markChunkUploaded(pendingId, chunkIndex, messageId, fileTelegramId) {
+  markChunkUploaded(pendingId, chunkIndex, messageId, fileTelegramId, botId = null) {
     const stmt = this.db.prepare(`
       UPDATE pending_chunks 
-      SET uploaded = 1, message_id = ?, file_telegram_id = ?
-      WHERE pending_id = ? AND chunk_index = ?
+      SET uploaded = 1, message_id = ?, file_telegram_id = ?, bot_id = ?
+      WHERE pending_id = ? AND chunk_index = ? AND uploaded = 0
     `);
-    stmt.run(messageId, fileTelegramId, pendingId, chunkIndex);
+    const result = stmt.run(messageId, fileTelegramId, botId, pendingId, chunkIndex);
 
     // Update uploaded count
-    this.db.prepare(`
+    if (result.changes > 0) this.db.prepare(`
       UPDATE pending_uploads SET uploaded_chunks = uploaded_chunks + 1 WHERE id = ?
     `).run(pendingId);
   }

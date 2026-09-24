@@ -4,8 +4,9 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 2.x.x   | :white_check_mark: |
-| 1.1.x   | :white_check_mark: |
+| 3.x.x   | :white_check_mark: |
+| 2.x.x   | Security fixes only |
+| 1.1.x   | :x:                |
 | 1.0.x   | :x:                |
 | < 1.0   | :x:                |
 
@@ -18,10 +19,12 @@ TAS uses industry-standard encryption:
 - **Salt**: 32 bytes, random per file
 - **IV**: 12 bytes (96-bit), random per file
 - **Auth Tag**: 16 bytes (128-bit) for integrity verification
-- **Config v2**: Bot token encrypted at rest with user's password (AES-256-GCM)
+- **Config v3**: Every bot token is encrypted at rest with the user's password (AES-256-GCM)
+- **Remote manifest**: File/chunk ownership and tags are gzip-compressed, AES-256-GCM encrypted, and authenticated before rebuild
+- **Public chunk metadata**: New uploads omit user filename and original size; legacy 2.x chunks may still expose them
 - **Password verification**: PBKDF2-based hash stored locally (not the password itself)
 
-Your password never leaves your machine. Telegram only stores encrypted blobs.
+TAS has no hosted service that receives your password. Telegram stores encrypted blobs but still observes traffic metadata including bot/chat identity, timing, encrypted sizes, chunk counts, IP/network data, and message identifiers. This is client-side encryption, not a formal zero-knowledge protocol.
 
 ## Reporting a Vulnerability
 
@@ -40,8 +43,11 @@ We aim to respond within 48 hours and will work with you to understand and resol
 ## Known Limitations
 
 - **Not a backup solution**: Telegram can delete content without notice
+- **Provider/policy risk**: Telegram can limit or terminate bot/account access; multi-bot mode does not mitigate this
 - **Password storage**: Password hash is stored locally for verification (not the password itself)
 - **Metadata**: Filenames and sizes are stored in local SQLite (unencrypted locally)
+- **Recovery dependency**: Index rebuild requires config.json, password, manifest message, and its owning bot
+- **Legacy metadata**: TAS 2.x Telegram chunks/captions may contain filenames and original sizes
 - **Share server**: HTTP-only; file content is encrypted but share page metadata is not TLS-protected
 
 ## Best Practices

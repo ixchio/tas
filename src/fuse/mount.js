@@ -7,6 +7,7 @@
 
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { pipeline } from 'stream/promises';
 
 let Fuse;
@@ -15,26 +16,93 @@ try {
 } catch {
     // fuse-native is optional — unavailable on ARM64 or systems without libfuse
 }
-import { TelegramClient } from '../telegram/client.js';
+import { TelegramPool } from '../telegram/pool.js';
 import { Encryptor } from '../crypto/encryption.js';
 import { Compressor } from '../utils/compression.js';
 import { FileIndex } from '../db/index.js';
-import { createHeader } from '../utils/chunker.js';
 import { createDownloadPipeline } from '../utils/download-stream.js';
+import { processFile } from '../index.js';
+import { hashFile } from '../crypto/encryption.js';
+import { backupRemoteManifest } from '../manifest.js';
+import {
+    normalizeLogicalPath,
+    listLogicalChildren,
+    isImplicitDirectory,
+    parentLogicalPath
+} from '../utils/logical-path.js';
 
 // File cache for performance (avoid re-downloading)
 const fileCache = new Map();
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const CACHE_MAX_ENTRIES = 100; // Prevent unbounded memory growth
 
+function withTimeout(promise, ms, label) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/** Verify the native FUSE stack, not merely that the JS module imports. */
+export async function checkFuseRuntime() {
+    if (process.platform === 'darwin') {
+        return {
+            supported: false,
+            reason: 'macOS mount is unsupported: fuse-native 2.x targets obsolete OSXFUSE APIs and current macFUSE/Apple Silicon is not validated'
+        };
+    }
+    if (!Fuse) return { supported: false, reason: 'fuse-native is not installed or failed to load' };
+
+    const configured = await new Promise((resolve, reject) => {
+        Fuse.isConfigured((error, ready) => error ? reject(error) : resolve(ready));
+    });
+    if (!configured) return { supported: false, reason: 'FUSE kernel/userspace support is not configured' };
+
+    const mountPoint = fs.mkdtempSync(path.join(os.tmpdir(), 'tas-fuse-doctor-'));
+    const now = new Date();
+    const probe = new Fuse(mountPoint, {
+        getattr(filepath, cb) {
+            if (filepath === '/') return cb(0, { mode: 0o40755, size: 4096, mtime: now, atime: now, ctime: now });
+            if (filepath === '/probe') return cb(0, { mode: 0o100444, size: 0, mtime: now, atime: now, ctime: now });
+            return cb(Fuse.ENOENT);
+        },
+        readdir(filepath, cb) {
+            return filepath === '/' ? cb(0, ['probe']) : cb(Fuse.ENOENT);
+        },
+        open(filepath, flags, cb) { return cb(0, 1); },
+        read(filepath, fd, buffer, length, position, cb) { return cb(0); }
+    }, { force: true, mkdir: true });
+
+    let mounted = false;
+    try {
+        await withTimeout(new Promise((resolve, reject) => probe.mount(error => error ? reject(error) : resolve())), 10000, 'FUSE mount');
+        mounted = true;
+        const entries = await withTimeout(fs.promises.readdir(mountPoint), 10000, 'FUSE readdir');
+        if (!entries.includes('probe')) throw new Error('FUSE readdir smoke test returned unexpected entries');
+        await withTimeout(new Promise((resolve, reject) => probe.unmount(error => error ? reject(error) : resolve())), 10000, 'FUSE unmount');
+        mounted = false;
+        return { supported: true };
+    } finally {
+        if (mounted) {
+            try { await new Promise(resolve => probe.unmount(() => resolve())); } catch { }
+        }
+        try { fs.rmdirSync(mountPoint); } catch { }
+    }
+}
+
 export class TelegramFS {
     constructor(options) {
+        if (process.platform === 'darwin') {
+            throw new Error(
+                'TAS mount is currently unsupported on macOS. fuse-native 2.x targets obsolete OSXFUSE APIs ' +
+                'and is not compatible with current macFUSE on Apple Silicon. Use push/pull/sync/share instead.'
+            );
+        }
         if (!Fuse) {
             throw new Error(
                 'fuse-native is not available on this system.\n' +
                 '  On Linux x86_64: npm install fuse-native && sudo apt install fuse libfuse-dev\n' +
-                '  On macOS: brew install macfuse && npm install fuse-native\n' +
-                '  On ARM64: see https://github.com/ixchio/tas/issues/1 for a workaround\n' +
                 '  All other TAS commands (push, pull, sync, share) work without FUSE.'
             );
         }
@@ -43,6 +111,7 @@ export class TelegramFS {
         this.password = options.password;
         this.config = options.config;
         this.mountPoint = options.mountPoint;
+        this.backupManifest = options.backupManifest || backupRemoteManifest;
 
         this.db = new FileIndex(path.join(this.dataDir, 'index.db'));
         this.db.init();
@@ -52,25 +121,102 @@ export class TelegramFS {
         this.client = null;
         this.fuse = null;
 
-        // Pending writes buffer
+        // Pending writes are disk-backed so a large FUSE write does not grow
+        // the Node process by the full file size.
         this.writeBuffers = new Map();
+        this.virtualDirs = new Set(['']);
+        this.filePaths = new Set();
+        this.fileByLogicalPath = new Map();
+        this.implicitDirs = new Set(['']);
+        this.childrenByDir = new Map();
+        this._refreshPathIndex();
     }
 
     async initialize() {
         // Connect to Telegram
-        this.client = new TelegramClient(this.dataDir);
-        await this.client.initialize(this.config.botToken);
-        this.client.setChatId(this.config.chatId);
+        this.client = new TelegramPool(this.dataDir, this.config.bots);
+    }
+
+    _logical(filepath, allowRoot = false) {
+        return normalizeLogicalPath(filepath, { allowRoot });
+    }
+
+    _allLogicalPaths() {
+        return [
+            ...this.filePaths,
+            ...this.writeBuffers.keys()
+        ];
+    }
+
+    _isDirectory(logicalPath) {
+        return this.virtualDirs.has(logicalPath) || this.implicitDirs.has(logicalPath) ||
+            isImplicitDirectory([...this.writeBuffers.keys()], logicalPath);
+    }
+
+    _refreshPathIndex() {
+        this.filePaths = new Set();
+        this.fileByLogicalPath = new Map();
+        this.implicitDirs = new Set(['']);
+        this.childrenByDir = new Map();
+        const addChild = (dir, child) => {
+            if (!this.childrenByDir.has(dir)) this.childrenByDir.set(dir, new Set());
+            this.childrenByDir.get(dir).add(child);
+        };
+
+        for (const file of this.db.listAll()) {
+            const logical = normalizeLogicalPath(file.filename);
+            this.filePaths.add(logical);
+            if (!this.fileByLogicalPath.has(logical)) this.fileByLogicalPath.set(logical, file);
+            const parts = logical.split('/');
+            let dir = '';
+            for (let index = 0; index < parts.length; index++) {
+                addChild(dir, parts[index]);
+                if (index < parts.length - 1) {
+                    dir = dir ? `${dir}/${parts[index]}` : parts[index];
+                    this.implicitDirs.add(dir);
+                }
+            }
+        }
+    }
+
+    _file(logicalPath) {
+        return this.fileByLogicalPath.get(logicalPath);
+    }
+
+    _newWritePath(logicalPath) {
+        const dir = path.join(this.dataDir, 'fuse-writes');
+        fs.mkdirSync(dir, { recursive: true });
+        const safe = Buffer.from(logicalPath).toString('hex').slice(0, 48) || 'root';
+        return path.join(dir, `${safe}-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`);
+    }
+
+    async _ensureWriteFile(logicalPath, { empty = false } = {}) {
+        if (this.writeBuffers.has(logicalPath)) return this.writeBuffers.get(logicalPath);
+        const tempPath = this._newWritePath(logicalPath);
+        if (empty) {
+            fs.closeSync(fs.openSync(tempPath, 'w', 0o600));
+        } else {
+            const existing = this._file(logicalPath);
+            if (existing) {
+                const cachedPath = await this.downloadFileToCache(logicalPath);
+                fs.copyFileSync(cachedPath, tempPath);
+            } else {
+                fs.closeSync(fs.openSync(tempPath, 'w', 0o600));
+            }
+        }
+        const entry = { path: tempPath, modified: true, isNew: !this._file(logicalPath) };
+        this.writeBuffers.set(logicalPath, entry);
+        return entry;
     }
 
     /**
      * Get file attributes
      */
     getattr(filepath, cb) {
-        const filename = path.basename(filepath);
+        let logical;
+        try { logical = this._logical(filepath, true); } catch { return cb(Fuse.ENOENT); }
 
-        // Root directory
-        if (filepath === '/') {
+        if (this._isDirectory(logical)) {
             return cb(0, {
                 mtime: new Date(),
                 atime: new Date(),
@@ -83,13 +229,14 @@ export class TelegramFS {
         }
 
         // Check write buffers first (new/pending files)
-        const wb = this.writeBuffers.get(filename);
+        const wb = this.writeBuffers.get(logical);
         if (wb) {
+            const stats = fs.statSync(wb.path);
             return cb(0, {
                 mtime: new Date(),
                 atime: new Date(),
                 ctime: new Date(),
-                size: wb.data.length,
+                size: stats.size,
                 mode: 0o100644, // regular file
                 uid: process.getuid?.() || 0,
                 gid: process.getgid?.() || 0
@@ -97,7 +244,7 @@ export class TelegramFS {
         }
 
         // Look up file in index
-        const file = this.db.findByName(filename);
+        const file = this._file(logical);
 
         if (!file) {
             return cb(Fuse.ENOENT);
@@ -118,28 +265,31 @@ export class TelegramFS {
      * List directory contents
      */
     readdir(filepath, cb) {
-        if (filepath !== '/') {
-            return cb(Fuse.ENOENT);
+        let logical;
+        try { logical = this._logical(filepath, true); } catch { return cb(Fuse.ENOENT); }
+        if (!this._isDirectory(logical)) return cb(Fuse.ENOENT);
+
+        const names = new Set(this.childrenByDir.get(logical) || []);
+        for (const name of listLogicalChildren([...this.writeBuffers.keys(), ...this.virtualDirs].filter(Boolean), logical)) {
+            names.add(name);
         }
-
-        const files = this.db.listAll();
-        const names = files.map(f => f.filename);
-
-        return cb(0, names);
+        return cb(0, [...names].sort((a, b) => a.localeCompare(b)));
     }
 
     /**
      * Open a file (just validates it exists)
      */
     open(filepath, flags, cb) {
-        const filename = path.basename(filepath);
+        let logical;
+        try { logical = this._logical(filepath); } catch { return cb(Fuse.ENOENT); }
+        if (this._isDirectory(logical)) return cb(Fuse.EISDIR || Fuse.EINVAL);
 
         // Check if it's a new file being written
-        if (this.writeBuffers.has(filename)) {
+        if (this.writeBuffers.has(logical)) {
             return cb(0, 42); // Return a dummy fd
         }
 
-        const file = this.db.findByName(filename);
+        const file = this._file(logical);
 
         if (!file) {
             return cb(Fuse.ENOENT);
@@ -152,24 +302,26 @@ export class TelegramFS {
      * Read file contents from disk cache
      */
     async read(filepath, fd, buffer, length, position, cb) {
-        const filename = path.basename(filepath);
+        let logical;
+        try { logical = this._logical(filepath); } catch { return cb(Fuse.ENOENT); }
 
         try {
             // Check write buffers first
-            const wb = this.writeBuffers.get(filename);
+            const wb = this.writeBuffers.get(logical);
             if (wb) {
-                const slice = wb.data.subarray(position, position + length);
-                slice.copy(buffer);
-                return cb(slice.length);
+                const writeFd = fs.openSync(wb.path, 'r');
+                const bytesRead = fs.readSync(writeFd, buffer, 0, length, position);
+                fs.closeSync(writeFd);
+                return cb(bytesRead);
             }
 
             // Check cache first
-            let cachedPath = this.getCached(filename);
+            let cachedPath = this.getCached(logical);
 
             if (!cachedPath) {
                 // Download, decrypt, and save to disk cache
-                cachedPath = await this.downloadFileToCache(filename);
-                this.setCache(filename, cachedPath);
+                cachedPath = await this.downloadFileToCache(logical);
+                this.setCache(logical, cachedPath);
             }
 
             // Copy requested portion to buffer from disk
@@ -187,50 +339,32 @@ export class TelegramFS {
     /**
      * Write to a file (buffers until release)
      */
-    write(filepath, fd, buffer, length, position, cb) {
-        const filename = path.basename(filepath);
-
-        // Get or create write buffer
-        if (!this.writeBuffers.has(filename)) {
-            this.writeBuffers.set(filename, {
-                data: Buffer.alloc(0),
-                modified: true
-            });
+    async write(filepath, fd, buffer, length, position, cb) {
+        let logical;
+        try { logical = this._logical(filepath); } catch { return cb(Fuse.ENOENT); }
+        try {
+            const wb = await this._ensureWriteFile(logical);
+            const writeFd = fs.openSync(wb.path, 'r+');
+            fs.writeSync(writeFd, buffer, 0, length, position);
+            fs.closeSync(writeFd);
+            wb.modified = true;
+            return cb(length);
+        } catch (error) {
+            console.error('Write error:', error.message);
+            return cb(Fuse.EIO);
         }
-
-        const wb = this.writeBuffers.get(filename);
-
-        // Expand buffer if needed
-        const newSize = Math.max(wb.data.length, position + length);
-        if (newSize > wb.data.length) {
-            const newBuf = Buffer.alloc(newSize);
-            wb.data.copy(newBuf);
-            wb.data = newBuf;
-        }
-
-        // Copy incoming data
-        buffer.copy(wb.data, position, 0, length);
-        wb.modified = true;
-
-        return cb(length);
     }
 
     /**
      * Create a new file
      */
     create(filepath, mode, cb) {
-        const filename = path.basename(filepath);
-
-        console.log(`[FUSE] Creating file: ${filename}`);
-
-        // Initialize empty write buffer
-        this.writeBuffers.set(filename, {
-            data: Buffer.alloc(0),
-            modified: true,
-            isNew: true
-        });
-
-        return cb(0, 42); // Return a valid fd
+        let logical;
+        try { logical = this._logical(filepath); } catch { return cb(Fuse.EINVAL); }
+        console.log(`[FUSE] Creating file: ${logical}`);
+        this._ensureWriteFile(logical, { empty: true })
+            .then(() => cb(0, 42))
+            .catch(() => cb(Fuse.EIO));
     }
 
     /**
@@ -244,22 +378,24 @@ export class TelegramFS {
      * Flush/sync file to Telegram
      */
     async release(filepath, fd, cb) {
-        const filename = path.basename(filepath);
+        let logical;
+        try { logical = this._logical(filepath); } catch { return cb(Fuse.ENOENT); }
 
-        const wb = this.writeBuffers.get(filename);
+        const wb = this.writeBuffers.get(logical);
         if (!wb || !wb.modified) {
             return cb(0);
         }
 
         try {
             // Upload to Telegram
-            await this.uploadFile(filename, wb.data);
+            await this.uploadFile(logical, wb.path);
 
             // Clear write buffer
-            this.writeBuffers.delete(filename);
+            this.writeBuffers.delete(logical);
+            try { fs.unlinkSync(wb.path); } catch { }
 
             // Invalidate cache
-            this.invalidateCache(filename);
+            this.invalidateCache(logical);
 
             return cb(0);
         } catch (err) {
@@ -272,25 +408,40 @@ export class TelegramFS {
      * Delete a file
      */
     async unlink(filepath, cb) {
-        const filename = path.basename(filepath);
-        const file = this.db.findByName(filename);
+        let logical;
+        try { logical = this._logical(filepath); } catch { return cb(Fuse.ENOENT); }
+        const file = this._file(logical);
 
         if (!file) {
             return cb(Fuse.ENOENT);
         }
 
         try {
-            // Delete from Telegram (optional - could just remove from index)
             const chunks = this.db.getChunks(file.id);
-            for (const chunk of chunks) {
-                await this.client.deleteMessage(chunk.message_id);
+            const before = this.db.exportManifest({ includeShares: true });
+            this.db.delete(file.id);
+            this._refreshPathIndex();
+
+            try {
+                await this.backupManifest({
+                    dataDir: this.dataDir,
+                    password: this.password,
+                    config: this.config,
+                    telegramPool: this.client
+                });
+            } catch (error) {
+                this.db.importManifest(before);
+                this._refreshPathIndex();
+                throw error;
             }
 
-            // Remove from index
-            this.db.delete(file.id);
+            // Delete remote messages only after the new recovery point is durable.
+            for (const chunk of chunks) {
+                await this.client.deleteMessage(chunk.message_id, chunk.bot_id || null);
+            }
 
             // Invalidate cache
-            this.invalidateCache(filename);
+            this.invalidateCache(logical);
 
             return cb(0);
         } catch (err) {
@@ -302,18 +453,61 @@ export class TelegramFS {
     /**
      * Rename/move a file (just update index, data stays in Telegram)
      */
-    rename(src, dest, cb) {
-        const oldName = path.basename(src);
-        const newName = path.basename(dest);
+    async rename(src, dest, cb) {
+        let oldName;
+        let newName;
+        try {
+            oldName = this._logical(src);
+            newName = this._logical(dest);
+        } catch {
+            return cb(Fuse.EINVAL);
+        }
 
-        const file = this.db.findByName(oldName);
+        if (oldName === newName) return cb(0);
+
+        const pendingWrite = this.writeBuffers.get(oldName);
+        if (pendingWrite) {
+            this.writeBuffers.delete(oldName);
+            this.writeBuffers.set(newName, pendingWrite);
+            return cb(0);
+        }
+
+        const file = this._file(oldName);
         if (!file) {
             return cb(Fuse.ENOENT);
         }
 
+        // Avoid duplicate filenames: remove the destination first
+        try {
+            const destFile = this._file(newName);
+            if (destFile && destFile.id !== file.id) {
+                const destChunks = this.db.getChunks(destFile.id);
+                for (const chunk of destChunks) {
+                    try { await this.client.deleteMessage(chunk.message_id, chunk.bot_id || null); } catch (e) { }
+                }
+                this.db.deleteFileCascade(destFile.id);
+                this.invalidateCache(newName);
+            }
+        } catch (e) { /* best effort */ }
+
         // Update filename in database
         this.db.db.prepare('UPDATE files SET filename = ? WHERE id = ?')
             .run(newName, file.id);
+        this._refreshPathIndex();
+
+        try {
+            await this.backupManifest({
+                dataDir: this.dataDir,
+                password: this.password,
+                config: this.config,
+                telegramPool: this.client
+            });
+        } catch (error) {
+            console.error('Remote manifest update failed after rename:', error.message);
+            this.db.db.prepare('UPDATE files SET filename = ? WHERE id = ?').run(oldName, file.id);
+            this._refreshPathIndex();
+            return cb(Fuse.EIO);
+        }
 
         // Update cache key
         const cached = fileCache.get(oldName);
@@ -325,46 +519,50 @@ export class TelegramFS {
         return cb(0);
     }
 
+    mkdir(filepath, mode, cb) {
+        let logical;
+        try { logical = this._logical(filepath); } catch { return cb(Fuse.EINVAL); }
+        if (this._file(logical) || this._isDirectory(logical)) return cb(Fuse.EEXIST || Fuse.EINVAL);
+        const parent = parentLogicalPath(logical);
+        if (!this._isDirectory(parent)) return cb(Fuse.ENOENT);
+        this.virtualDirs.add(logical);
+        return cb(0);
+    }
+
+    rmdir(filepath, cb) {
+        let logical;
+        try { logical = this._logical(filepath); } catch { return cb(Fuse.EINVAL); }
+        if (!this._isDirectory(logical)) return cb(Fuse.ENOENT);
+        if (listLogicalChildren([...this._allLogicalPaths(), ...this.virtualDirs].filter(Boolean), logical).length > 0) {
+            return cb(Fuse.ENOTEMPTY || Fuse.EINVAL);
+        }
+        this.virtualDirs.delete(logical);
+        return cb(0);
+    }
+
     /**
      * Truncate a file
      */
-    truncate(filepath, size, cb) {
-        const filename = path.basename(filepath);
-
-        // Get or load into write buffer
-        if (!this.writeBuffers.has(filename)) {
-            const cachedPath = this.getCached(filename);
-            if (cachedPath) {
-                this.writeBuffers.set(filename, {
-                    data: fs.readFileSync(cachedPath), // Note: RAM buffer here could be big, but it's okay for truncate/writes right now
-                    modified: true
-                });
-            } else {
-                this.writeBuffers.set(filename, {
-                    data: Buffer.alloc(0),
-                    modified: true
-                });
-            }
+    async truncate(filepath, size, cb) {
+        let logical;
+        try { logical = this._logical(filepath); } catch { return cb(Fuse.ENOENT); }
+        try {
+            // Always hydrate a remote file before truncating it. Falling back
+            // to an empty buffer silently destroyed uncached content.
+            const wb = await this._ensureWriteFile(logical);
+            fs.truncateSync(wb.path, size);
+            wb.modified = true;
+            return cb(0);
+        } catch (error) {
+            console.error('Truncate error:', error.message);
+            return cb(Fuse.EIO);
         }
-
-        const wb = this.writeBuffers.get(filename);
-
-        if (size < wb.data.length) {
-            wb.data = wb.data.subarray(0, size);
-        } else if (size > wb.data.length) {
-            const newBuf = Buffer.alloc(size);
-            wb.data.copy(newBuf);
-            wb.data = newBuf;
-        }
-
-        wb.modified = true;
-        return cb(0);
     }
 
     // ============== Helper Methods ==============
 
     async downloadFileToCache(filename) {
-        const file = this.db.findByName(filename);
+        const file = this._file(filename);
         if (!file) throw new Error('File not found');
 
         const cacheDir = path.join(this.dataDir, 'cache');
@@ -402,68 +600,29 @@ export class TelegramFS {
         return outputPath;
     }
 
-    async uploadFile(filename, data) {
-        const { hashData } = await import('../crypto/encryption.js');
-        const hash = hashData(data);
-
-        // Check if already exists by name
-        const existingByName = this.db.findByName(filename);
-        if (existingByName) {
-            // Delete old version
-            const chunks = this.db.getChunks(existingByName.id);
-            for (const chunk of chunks) {
-                try { await this.client.deleteMessage(chunk.message_id); } catch (e) { }
-            }
-            this.db.delete(existingByName.id);
-        }
-
-        // Check if already exists by hash (same content, different name)
-        const existingByHash = this.db.findByHash(hash);
-        if (existingByHash) {
-            // Same content already exists, just skip
-            console.log(`[FUSE] File with same content already exists as ${existingByHash.filename}`);
+    async uploadFile(filename, sourcePath) {
+        const existing = this._file(filename);
+        const hash = await hashFile(sourcePath);
+        if (existing?.hash === hash) {
+            await this.backupManifest({
+                dataDir: this.dataDir,
+                password: this.password,
+                config: this.config,
+                telegramPool: this.client
+            });
             return;
         }
 
-        // Compress
-        const { data: compressedData, compressed } = await this.compressor.compress(data, filename);
-
-        // Encrypt
-        const encryptedData = this.encryptor.encrypt(compressedData);
-
-        // Create temp file with header
-        const tempDir = process.env.TAS_TMP_DIR || path.join(this.dataDir, 'tmp');
-        if (!fs.existsSync(tempDir)) {
-            fs.mkdirSync(tempDir, { recursive: true });
-        }
-
-        const flags = compressed ? 1 : 0;
-        const header = createHeader(filename, data.length, 0, 1, flags);
-        const fileData = Buffer.concat([header, encryptedData]);
-
-        const tempPath = path.join(tempDir, `${hash.substring(0, 12)}.tas`);
-        fs.writeFileSync(tempPath, fileData);
-
-        // Upload to Telegram
-        const result = await this.client.sendFile(tempPath, `📦 ${filename}`);
-
-        // Add to index
-        const fileId = this.db.addFile({
-            filename,
-            hash,
-            originalSize: data.length,
-            storedSize: encryptedData.length,
-            chunks: 1,
-            compressed
+        const result = await processFile(sourcePath, {
+            password: this.password,
+            dataDir: this.dataDir,
+            customName: filename,
+            config: this.config,
+            telegramPool: this.client,
+            replaceExisting: true
         });
-
-        this.db.addChunk(fileId, 0, result.messageId.toString(), fileData.length);
-        this.db.db.prepare('UPDATE chunks SET file_telegram_id = ? WHERE file_id = ? AND chunk_index = ?')
-            .run(result.fileId, fileId, 0);
-
-        // Cleanup
-        fs.unlinkSync(tempPath);
-        try { fs.rmdirSync(tempDir); } catch (e) { }
+        this._refreshPathIndex();
+        if (result.manifestWarning) throw new Error(`Remote recovery manifest failed: ${result.manifestWarning}`);
     }
 
     getCached(filename) {
@@ -537,6 +696,8 @@ export class TelegramFS {
             release: this.release.bind(this),
             unlink: this.unlink.bind(this),
             rename: this.rename.bind(this),
+            mkdir: this.mkdir.bind(this),
+            rmdir: this.rmdir.bind(this),
             truncate: this.truncate.bind(this),
             ftruncate: this.ftruncate.bind(this)
         };

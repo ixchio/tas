@@ -9,18 +9,24 @@ import { EventEmitter } from 'events';
 import { FileIndex } from '../db/index.js';
 import { hashFile } from '../crypto/encryption.js';
 import { processFile } from '../index.js';
+import { TelegramPool } from '../telegram/pool.js';
+import { backupRemoteManifest } from '../manifest.js';
 
 // Debounce time in ms to batch rapid file changes
 const DEBOUNCE_MS = 1000;
 
-// Ignore patterns
+// Ignore patterns.
+// NOTE: dotfiles are intentionally NOT ignored — TAS is advertised as a
+// vault for `.env` files, SSH keys, etc. Only well-known junk is skipped.
 const IGNORE_PATTERNS = [
-    /^\./, // Hidden files
+    /^\.DS_Store$/, // macOS metadata
+    /^\.git$/, // git dir name
+    /\.git[\/\\]/, // anything inside .git
     /~$/, // Backup files
     /\.swp$/, // Vim swap files
     /\.tmp$/, // Temp files
-    /node_modules/,
-    /\.git/
+    /(^|[\/\\])node_modules([\/\\]|$)/,
+    /(^|[\/\\])\.tas([\/\\]|$)/ // our own data dir if nested
 ];
 
 export class SyncEngine extends EventEmitter {
@@ -33,6 +39,7 @@ export class SyncEngine extends EventEmitter {
         this.watchers = new Map(); // path -> FSWatcher
         this.pendingChanges = new Map(); // path -> timeout
         this.db = null;
+        this.telegramPool = null;
         this.running = false;
     }
 
@@ -42,6 +49,8 @@ export class SyncEngine extends EventEmitter {
     async initialize() {
         this.db = new FileIndex(path.join(this.dataDir, 'index.db'));
         this.db.init();
+        this.telegramPool = new TelegramPool(this.dataDir, this.config.bots);
+        await this.telegramPool.initialize({ includeDisabled: false });
     }
 
     /**
@@ -98,6 +107,7 @@ export class SyncEngine extends EventEmitter {
 
         let uploaded = 0;
         let skipped = 0;
+        const supersededChunks = [];
 
         // Process files with concurrency limit
         const CONCURRENCY = 4;
@@ -129,14 +139,18 @@ export class SyncEngine extends EventEmitter {
                 try {
                     this.emit('file-upload-start', { file: file.relativePath });
 
-                    await processFile(file.path, {
+                    const result = await processFile(file.path, {
                         password: this.password,
                         dataDir: this.dataDir,
                         customName: file.relativePath, // Use relative path as name
                         config: this.config,
+                        telegramPool: this.telegramPool,
+                        updateManifest: false,
+                        replaceExisting: true,
                         limitRate: this.limitRate ? Math.floor(this.limitRate / CONCURRENCY) : null,
                         onProgress: (msg) => this.emit('progress', { file: file.relativePath, message: msg })
                     });
+                    supersededChunks.push(...(result.supersededChunks || []));
 
                     // Update sync state
                     this.db.updateSyncState(folder.id, file.relativePath, hash, file.mtime);
@@ -144,15 +158,10 @@ export class SyncEngine extends EventEmitter {
 
                     this.emit('file-upload-complete', { file: file.relativePath });
                 } catch (err) {
-                    // File might already exist, skip
-                    if (err.message.includes('duplicate')) {
-                        this.db.updateSyncState(folder.id, file.relativePath, hash, file.mtime);
-                        skipped++;
-                    } else {
-                        // Sleep briefly on non-duplicate error (potential rate limits)
-                        await new Promise(r => setTimeout(r, 2000));
-                        this.emit('file-upload-error', { file: file.relativePath, error: err.message });
-                    }
+                    // Sleep briefly on a network/provider error before this
+                    // worker advances; the staged upload remains resumable.
+                    await new Promise(r => setTimeout(r, 2000));
+                    this.emit('file-upload-error', { file: file.relativePath, error: err.message });
                 }
             }
         };
@@ -162,6 +171,22 @@ export class SyncEngine extends EventEmitter {
         }
 
         await Promise.all(promises);
+
+        if (uploaded > 0) {
+            try {
+                await backupRemoteManifest({
+                    dataDir: this.dataDir,
+                    password: this.password,
+                    config: this.config,
+                    telegramPool: this.telegramPool
+                });
+                for (const chunk of supersededChunks) {
+                    try { await this.telegramPool.deleteMessage(chunk.message_id, chunk.bot_id || null); } catch { }
+                }
+            } catch (error) {
+                this.emit('manifest-error', { error: error.message });
+            }
+        }
 
         this.emit('sync-complete', { folder: folderPath, uploaded, skipped });
 
@@ -224,6 +249,8 @@ export class SyncEngine extends EventEmitter {
                 dataDir: this.dataDir,
                 customName: filename,
                 config: this.config,
+                telegramPool: this.telegramPool,
+                replaceExisting: true,
                 limitRate: this.limitRate,
                 onProgress: (msg) => this.emit('progress', { file: filename, message: msg })
             });
@@ -232,44 +259,88 @@ export class SyncEngine extends EventEmitter {
 
             this.emit('file-upload-complete', { file: filename });
         } catch (err) {
-            if (!err.message.includes('duplicate')) {
-                this.emit('file-upload-error', { file: filename, error: err.message });
-            }
+            this.emit('file-upload-error', { file: filename, error: err.message });
         }
     }
 
     /**
-     * Start watching a folder
+     * Collect all subdirectories under dirPath (including itself).
+     * Used because fs.watch({ recursive: true }) only works on macOS/Windows.
      */
-    watchFolder(folderPath) {
-        if (this.watchers.has(folderPath)) {
-            return; // Already watching
+    _collectDirs(dirPath) {
+        const dirs = [dirPath];
+        let entries;
+        try {
+            entries = fs.readdirSync(dirPath, { withFileTypes: true });
+        } catch {
+            return dirs;
+        }
+        for (const entry of entries) {
+            if (!entry.isDirectory()) continue;
+            if (this.shouldIgnore(entry.name)) continue;
+            dirs.push(...this._collectDirs(path.join(dirPath, entry.name)));
+        }
+        return dirs;
+    }
+
+    _watchSingleDir(watchedDir, rootPath) {
+        if (this.watchers.has(watchedDir)) return;
+        let watcher;
+        try {
+            watcher = fs.watch(watchedDir, (event, filename) => {
+                if (!filename) return;
+                const fullPath = path.join(watchedDir, filename);
+                const rel = path.relative(rootPath, fullPath);
+                if (!rel || rel.startsWith('..')) return;
+                // A new subdirectory appeared — start watching it too
+                try {
+                    if (fs.existsSync(fullPath) && fs.statSync(fullPath).isDirectory()) {
+                        if (!this.shouldIgnore(filename)) {
+                            for (const d of this._collectDirs(fullPath)) {
+                                this._watchSingleDir(d, rootPath);
+                            }
+                        }
+                        return;
+                    }
+                } catch { /* fall through to file handling */ }
+                this.handleFileChange(rootPath, rel);
+            });
+        } catch (err) {
+            this.emit('watch-error', { folder: watchedDir, error: err.message });
+            return;
         }
 
-        const watcher = fs.watch(folderPath, { recursive: true }, (event, filename) => {
-            if (filename) {
-                this.handleFileChange(folderPath, filename);
-            }
-        });
-
         watcher.on('error', (err) => {
-            this.emit('watch-error', { folder: folderPath, error: err.message });
+            this.emit('watch-error', { folder: watchedDir, error: err.message });
         });
 
-        this.watchers.set(folderPath, watcher);
+        this.watchers.set(watchedDir, watcher);
+    }
+
+    /**
+     * Start watching a folder (recursive on all platforms)
+     */
+    watchFolder(folderPath) {
+        if (!fs.existsSync(folderPath)) return;
+        for (const dir of this._collectDirs(folderPath)) {
+            this._watchSingleDir(dir, folderPath);
+        }
         this.emit('watch-start', { folder: folderPath });
     }
 
     /**
-     * Stop watching a folder
+     * Stop watching a folder (closes the root watcher and any subdir watchers)
      */
     unwatchFolder(folderPath) {
-        const watcher = this.watchers.get(folderPath);
-        if (watcher) {
-            watcher.close();
-            this.watchers.delete(folderPath);
-            this.emit('watch-stop', { folder: folderPath });
+        let stopped = false;
+        for (const [watchedDir, watcher] of [...this.watchers]) {
+            if (watchedDir === folderPath || watchedDir.startsWith(folderPath + path.sep)) {
+                try { watcher.close(); } catch { }
+                this.watchers.delete(watchedDir);
+                stopped = true;
+            }
         }
+        if (stopped) this.emit('watch-stop', { folder: folderPath });
     }
 
     /**
