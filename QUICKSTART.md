@@ -44,4 +44,4 @@ Multi-bot mode distributes chunks. It is not redundancy, quota assurance, ban pr
 
 ## Mount support
 
-`tas mount` is supported only on validated Linux/libfuse hosts in this release. Run `tas doctor` first; it performs a real mount/readdir/unmount smoke test. macOS mount is disabled until TAS has a maintained current-macFUSE backend and macOS CI.
+`tas mount` needs a native FUSE runtime. On Linux install `fuse` and `libfuse-dev`. On macOS install current macFUSE and Xcode Command Line Tools before installing TAS; TAS rebuilds its optional native addon against the installed macFUSE library. Run `tas doctor` first and mount only when its real mount/readdir/unmount smoke test passes.

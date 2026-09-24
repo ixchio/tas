@@ -30,4 +30,4 @@ No. Each chunk has one owning bot. TAS records that bot so reads and deletes rou
 
 ## Does mount work on macOS?
 
-Not in this release. The current `fuse-native@2.x` dependency targets obsolete OSXFUSE APIs and is not validated against current macFUSE or Apple Silicon. Linux users should run `tas doctor` for a real native FUSE smoke test.
+Yes with current macFUSE, Xcode Command Line Tools, and a locally rebuilt native addon. TAS never installs or replaces macFUSE; its install hook selects the system `libfuse` and compiles the optional addon for the active CPU. Run `tas doctor` before use. If the real mount/readdir/unmount smoke test does not pass, do not mount data.

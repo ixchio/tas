@@ -33,9 +33,9 @@
   <!-- HERO -->
   <section class="hero">
     <div class="w">
-      <p class="hero-sub">Open source · MIT · v3.0.0 · experimental</p>
+      <p class="hero-sub">Open source · MIT · v3.0.1 · experimental</p>
       <h1>Your files encrypted.<br>Transported through Telegram.<br>Indexed locally.</h1>
-      <p class="hero-lead">TAS is an experimental local-first CLI with AES-256-GCM content encryption, resumable 19 MiB chunks, encrypted index recovery, Linux FUSE mount, sync, and multi-bot routing. It is not an unlimited-storage or durability service.</p>
+      <p class="hero-lead">TAS is an experimental local-first CLI with AES-256-GCM content encryption, resumable 19 MiB chunks, encrypted index recovery, native FUSE mount, sync, and multi-bot routing. It is not an unlimited-storage or durability service.</p>
       <div class="hero-actions">
         <a href="https://github.com/ixchio/tas" class="btn-p">GitHub</a>
         <a href="#install" class="btn-s">Get started</a>
@@ -103,7 +103,7 @@
       <div class="feat-list">
         <div class="feat-item">
           <h3>FUSE mount</h3>
-          <p>Run <code>tas mount ~/cloud</code> on a validated Linux/libfuse host. Nested sync paths are real virtual directories and writes are disk-backed. macOS mount is disabled until TAS has a maintained current-macFUSE backend and CI.</p>
+          <p>Run <code>tas mount ~/cloud</code> on a validated Linux/libfuse host or a Mac with current macFUSE and Xcode Command Line Tools. On macOS TAS rebuilds the optional native addon against the installed system library. Nested sync paths are real virtual directories and writes are disk-backed.</p>
         </div>
         <div class="feat-item">
           <h3>Folder sync</h3>
@@ -272,7 +272,7 @@ tas list --json | jq '.[].filename'</pre>
         </details>
         <details>
           <summary>Windows support?</summary>
-          <p>CLI operations work where Node.js and native dependencies are supported. FUSE mount is Linux-only in this release; macOS mount is explicitly unsupported.</p>
+          <p>CLI operations work where Node.js and native dependencies are supported. FUSE needs Linux libfuse or current macFUSE with Xcode Command Line Tools. Run <code>tas doctor</code> and mount only after its real smoke test passes.</p>
         </details>
       </div>
     </div>

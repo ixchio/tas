@@ -18,7 +18,7 @@
   <a href="https://github.com/ixchio/tas/network/members"><img src="https://img.shields.io/github/forks/ixchio/tas?style=social" alt="GitHub Forks"></a>
   <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen?logo=node.js" alt="Node.js >= 18">
   <img src="https://img.shields.io/badge/encryption-AES--256--GCM-blueviolet?logo=shield" alt="AES-256-GCM">
-  <img src="https://img.shields.io/badge/tests-97%20passing-success" alt="97 Tests Passing">
+  <img src="https://img.shields.io/badge/tests-101%20passing-success" alt="101 Tests Passing">
 </p>
 
 <p align="center">
@@ -113,7 +113,7 @@ cp report.pdf ~/cloud/       # Drop files in — auto-encrypted and uploaded
 tas unmount ~/cloud          # Clean unmount when done
 ```
 
-> **Linux only for this release:** install `fuse`/`libfuse-dev`, then run `tas doctor` for a real mount → readdir → unmount smoke test. macOS mount is explicitly unsupported because `fuse-native@2.x` targets obsolete OSXFUSE APIs and is not validated with current macFUSE or Apple Silicon. Push, pull, sync, and share still work on macOS.
+> **Native FUSE is verified, not assumed:** Linux needs `fuse`/`libfuse-dev`. macOS uses current macFUSE and rebuilds the optional native addon against the installed system library on first install. Install Xcode Command Line Tools before TAS, then run `tas doctor`; mount is available only when its real mount → readdir → unmount smoke test passes.
 
 ---
 
@@ -193,7 +193,7 @@ tas doctor
 # ✓ Database: 42 files, 1.3 GB total across 28 chunks
 # ✓ Disk space: 50 GB free (32% used)
 # ✓ Encryption: AES-256-GCM · PBKDF2-SHA512 · 600,000 iterations (OWASP 2025)
-# ✓ FUSE runtime: mount → readdir → unmount passed (Linux)
+# ✓ FUSE runtime: mount → readdir → unmount passed
 # ✓ Telegram connectivity: 2/2 bots OK
 # ✨ All systems go!
 ```
@@ -319,7 +319,7 @@ Reliability mechanisms implemented by TAS (not an SLA):
 | **Resume Uploads** | Network-stage chunks are staged on disk and persisted in `pending_uploads`; `tas resume` continues them |
 | **Index Recovery** | Authenticated encrypted remote manifest; `tas index rebuild` restores file/chunk ownership |
 | **Graceful Shutdown** | SIGINT/SIGTERM handled; staged chunks and SQLite WAL reduce partial-state risk |
-| **Self-Diagnostics** | Checks config/database/chunk limits, all bots, and a real Linux FUSE smoke mount |
+| **Self-Diagnostics** | Checks config/database/chunk limits, all bots, and a real native FUSE smoke mount |
 
 ---
 
@@ -351,7 +351,7 @@ tas bot add|list|enable|disable|remove  # 🤖 Manage experimental bot pool
 <summary><strong>Mount & Sync</strong></summary>
 
 ```bash
-# FUSE Mount (Linux only in this release)
+# FUSE Mount (Linux/libfuse or macOS/current macFUSE)
 tas mount <path>                  # Mount Telegram storage as a local folder
 tas unmount <path>                # Clean unmount
 
@@ -462,7 +462,7 @@ Use TAS only at your own risk, do not use multiple bots to evade limits, follow 
 | 📌 **Not a replacement for backups** | Telegram can purge old messages. Use TAS alongside, not instead of, real backup solutions. |
 | 📌 **19 MiB payload chunks** | Hosted Bot API uploads permit more, but `getFile` documents only 20 MB downloads. TAS stays below the read limit. |
 | 📌 **Multi-bot is experimental** | It distributes chunks and preserves ownership mapping; it is not redundancy or ban protection. |
-| 📌 **FUSE = Linux only for now** | macOS mount is disabled until a maintained modern macFUSE backend and macOS CI exist. |
+| 📌 **macOS needs a native build** | Install current macFUSE and Xcode Command Line Tools before installing TAS. `tas doctor` must pass its real FUSE smoke test before you mount data. |
 | 📌 **Recovery needs config** | `index.db` can be rebuilt from the encrypted manifest only if `config.json`, password, manifest message, and owning bot survive. |
 | 📌 **No versioning (yet)** | Overwriting a file replaces the previous version. |
 | 📌 **Internet required** | Telegram-backed — offline access requires files pulled locally first. |

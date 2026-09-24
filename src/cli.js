@@ -814,7 +814,7 @@ program
 // ============== MOUNT COMMAND ==============
 program
     .command('mount <mountpoint>')
-    .description('🔥 Mount Telegram storage as a local folder (Linux FUSE only)')
+    .description('🔥 Mount Telegram storage as a local folder (Linux FUSE or current macFUSE)')
     .option('-p, --password <password>', 'Encryption password (uses TAS_PASSWORD env var if not provided)')
     .action(async (mountpoint, options) => {
         console.log(chalk.cyan('\n🗂️  Mounting Telegram as filesystem...\n'));
@@ -872,7 +872,7 @@ program
             console.log(chalk.dim('\nNote: FUSE requires libfuse to be installed:'));
             console.log(chalk.dim('  Ubuntu/Debian: sudo apt install fuse libfuse-dev'));
             console.log(chalk.dim('  Fedora: sudo dnf install fuse fuse-devel'));
-            console.log(chalk.dim('  macOS: TAS mount is currently unsupported (push/pull/sync still work)\n'));
+            console.log(chalk.dim('  macOS: install current macFUSE and Xcode Command Line Tools, then reinstall TAS\n'));
             process.exit(1);
         }
     });
@@ -890,16 +890,17 @@ program
         try {
             const { execFileSync } = await import('child_process');
 
-            // Use fusermount on Linux, umount on macOS
+            // Match fuse-native's platform unmount mechanism without invoking a shell.
             const isMac = process.platform === 'darwin';
-            const executable = isMac ? 'umount' : 'fusermount';
-            const args = isMac ? [absMount] : ['-u', absMount];
+            const executable = isMac ? 'diskutil' : 'fusermount';
+            const args = isMac ? ['unmount', 'force', absMount] : ['-u', absMount];
             execFileSync(executable, args, { stdio: 'pipe' });
 
             spinner.succeed(`Unmounted ${chalk.green(absMount)}`);
         } catch (err) {
             spinner.fail(`Unmount failed: ${err.message}`);
-            console.log(chalk.dim('\nTry: fusermount -u ' + absMount));
+            const retry = process.platform === 'darwin' ? `diskutil unmount force ${absMount}` : `fusermount -u ${absMount}`;
+            console.log(chalk.dim('\nTry: ' + retry));
             process.exit(1);
         }
     });

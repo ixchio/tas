@@ -29,7 +29,7 @@ TAS (Telegram as Storage) is an experimental Node.js CLI that uses Telegram Bot 
 
 ## Testing
 - `npm test` runs all tests via `node --test tests/*.test.js`
-- 97 tests cover encryption, WAS1 headers, compression, nested FUSE paths (including 60k entries), schema migrations, multi-bot routing, resumable state, rate queues, manifests, uploads, tags, sync DB, and share DB
+- 101 tests cover encryption, WAS1 headers, compression, modern macFUSE detection, nested FUSE paths (including 60k entries), schema migrations, multi-bot routing, resumable state, rate queues, manifests, uploads, tags, sync DB, and share DB
 - Telegram network tests use local fakes; the suite never requires a live bot token
 
 ## Common Pitfalls
@@ -38,7 +38,7 @@ TAS (Telegram as Storage) is an experimental Node.js CLI that uses Telegram Bot 
 - Share server HTML must escape filenames to prevent XSS
 - Content-Disposition headers need RFC 6266 encoding for Unicode filenames
 - FUSE `fileCache` is module-level with LRU eviction at 100 entries
-- macOS mount is unsupported until a modern macFUSE backend and CI exist
+- macOS mount uses current macFUSE only after `src/fuse/macfuse.cjs` rebuilds the addon against the system library; `tas doctor` must pass a real smoke mount before use
 - Disabled bots must remain configured while chunks or the remote manifest depend on them
 - Version in `src/utils/branding.js` must match `package.json` version
 - `Chunker` class in `chunker.js` is dead code — superseded by streaming chunker in `index.js`

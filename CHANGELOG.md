@@ -2,6 +2,14 @@
 
 All notable changes to TAS (Telegram as Storage) will be documented in this file.
 
+## [3.0.1] - 2026-09-25
+
+### Fixed — current macFUSE mount support (#4)
+- **System macFUSE build** — TAS no longer accepts the bundled OSXFUSE 3 library. On macOS it detects `/Library/Filesystems/macfuse.fs`, selects the installed `libfuse` headers and library, and rebuilds the optional `fuse-native` addon for the active CPU.
+- **Apple Silicon support path** — the rebuilt addon uses macFUSE's supported v2 API surface rather than the legacy binary with no arm64 slice. TAS never installs, replaces, or removes a FUSE kernel extension.
+- **Strict runtime guard** — TAS inspects the loaded native addon and refuses mount if it still links to `libosxfuse` or lacks a system-macFUSE build. `tas doctor` then performs the real mount → readdir → unmount smoke test.
+- **Install guidance** — macOS requires current macFUSE and Xcode Command Line Tools before TAS is installed. A failed native build leaves push, pull, sync, and share available while mount stays disabled.
+
 ## [3.0.0] - 2026-09-24
 
 ### Fixed — FUSE and path correctness

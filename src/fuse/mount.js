@@ -9,6 +9,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { pipeline } from 'stream/promises';
+import macFuse from './macfuse.cjs';
 
 let Fuse;
 try {
@@ -47,10 +48,8 @@ function withTimeout(promise, ms, label) {
 /** Verify the native FUSE stack, not merely that the JS module imports. */
 export async function checkFuseRuntime() {
     if (process.platform === 'darwin') {
-        return {
-            supported: false,
-            reason: 'macOS mount is unsupported: fuse-native 2.x targets obsolete OSXFUSE APIs and current macFUSE/Apple Silicon is not validated'
-        };
+        const macStatus = macFuse.validateMacFuseNativeBinding();
+        if (!macStatus.ready) return { supported: false, reason: macStatus.reason };
     }
     if (!Fuse) return { supported: false, reason: 'fuse-native is not installed or failed to load' };
 
@@ -94,10 +93,13 @@ export async function checkFuseRuntime() {
 export class TelegramFS {
     constructor(options) {
         if (process.platform === 'darwin') {
-            throw new Error(
-                'TAS mount is currently unsupported on macOS. fuse-native 2.x targets obsolete OSXFUSE APIs ' +
-                'and is not compatible with current macFUSE on Apple Silicon. Use push/pull/sync/share instead.'
-            );
+            const macStatus = macFuse.validateMacFuseNativeBinding();
+            if (!macStatus.ready) {
+                throw new Error(
+                    'TAS mount needs current macFUSE plus a rebuilt native addon: ' + macStatus.reason +
+                    '. Install Xcode Command Line Tools, reinstall TAS, then run tas doctor.'
+                );
+            }
         }
         if (!Fuse) {
             throw new Error(

@@ -1,7 +1,7 @@
 {
   "name": "@nightowne/tas-cli",
-  "version": "3.0.0",
-  "description": "Experimental local-first encrypted file transport over Telegram bots with resumable chunks, index recovery, and Linux FUSE mount",
+  "version": "3.0.1",
+  "description": "Experimental local-first encrypted file transport over Telegram bots with resumable chunks, index recovery, and FUSE mount",
   "type": "module",
   "main": "src/index.js",
   "bin": {
@@ -11,7 +11,8 @@
     "start": "node src/cli.js",
     "init": "node src/cli.js init",
     "test": "node --test tests/*.test.js",
-    "prepublishOnly": "npm test"
+    "prepublishOnly": "npm test",
+    "postinstall": "node src/fuse/macfuse.cjs"
   },
   "keywords": [
     "telegram",
