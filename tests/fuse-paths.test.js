@@ -59,6 +59,49 @@ describe('FUSE nested logical paths', () => {
     it('returns directory attributes for implicit parent paths', async () => {
         const attributes = await callbackResult(cb => filesystem.getattr('/subdir/nested', cb));
         assert.equal(attributes.mode & 0o170000, 0o040000);
+        assert.ok(attributes.ino > 0);
+        assert.equal(attributes.blksize, 4096);
+    });
+
+    it('provides GUI-compatible filesystem and directory operations', async () => {
+        const stats = await callbackResult(cb => filesystem.statfs('/', cb));
+        assert.ok(stats.bsize > 0);
+        assert.ok(stats.blocks > 0);
+        assert.equal(stats.namemax, 255);
+
+        await callbackResult(cb => filesystem.access('/subdir', 4, cb));
+        const descriptor = await callbackResult(cb => filesystem.opendir('/subdir', 0, cb));
+        assert.ok(descriptor > 0);
+        await callbackResult(cb => filesystem.releasedir('/subdir', descriptor, cb));
+    });
+
+    it('supports session xattrs used by desktop and SMB clients', async () => {
+        const value = Buffer.from('archive');
+        await callbackResult(cb => filesystem.setxattr('/a.txt', 'user.DOSATTRIB', value, 0, 0, cb));
+
+        const names = await callbackResult(cb => filesystem.listxattr('/a.txt', cb));
+        const stored = await callbackResult(cb => filesystem.getxattr('/a.txt', 'user.DOSATTRIB', 0, cb));
+        assert.deepEqual(names, ['user.DOSATTRIB']);
+        assert.deepEqual(stored, value);
+
+        await callbackResult(cb => filesystem.removexattr('/a.txt', 'user.DOSATTRIB', cb));
+        await assert.rejects(
+            callbackResult(cb => filesystem.getxattr('/a.txt', 'user.DOSATTRIB', 0, cb)),
+            /FUSE status -61/
+        );
+    });
+
+    it('keeps shared access explicit and enables kernel permission checks', () => {
+        filesystem.allowOther = true;
+        assert.deepEqual(filesystem._mountOptions(), {
+            debug: false,
+            force: true,
+            mkdir: true,
+            allowOther: true,
+            defaultPermissions: true,
+            fsname: 'tas',
+            subtype: 'tas'
+        });
     });
 
     it('opens the exact logical path instead of a basename or fuzzy match', async () => {

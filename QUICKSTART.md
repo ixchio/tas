@@ -45,3 +45,5 @@ Multi-bot mode distributes chunks. It is not redundancy, quota assurance, ban pr
 ## Mount support
 
 `tas mount` needs a native FUSE runtime. On Linux install `fuse` and `libfuse-dev`. On macOS install current macFUSE and Xcode Command Line Tools before installing TAS; TAS rebuilds its optional native addon against the installed macFUSE library. Run `tas doctor` first and mount only when its real mount/readdir/unmount smoke test passes.
+
+For Samba or another service account, add `user_allow_other` to `/etc/fuse.conf` and mount with `tas mount /mnt/tg-drive --allow-other`. Shared access is opt-in because it exposes the mount to other local users subject to Unix permissions.

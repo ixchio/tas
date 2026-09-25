@@ -45,6 +45,22 @@ function withTimeout(promise, ms, label) {
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+function pathInode(logicalPath) {
+    if (!logicalPath) return 1;
+    let hash = 2166136261;
+    for (let index = 0; index < logicalPath.length; index++) {
+        hash ^= logicalPath.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0) || 1;
+}
+
+function fuseStatNumber(value, fallback = 0) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number < 0) return fallback;
+    return Math.min(Math.floor(number), 0xffffffff);
+}
+
 /** Verify the native FUSE stack, not merely that the JS module imports. */
 export async function checkFuseRuntime() {
     if (process.platform === 'darwin') {
@@ -113,7 +129,9 @@ export class TelegramFS {
         this.password = options.password;
         this.config = options.config;
         this.mountPoint = options.mountPoint;
+        this.allowOther = options.allowOther === true;
         this.backupManifest = options.backupManifest || backupRemoteManifest;
+        this.mountStartedAt = new Date();
 
         this.db = new FileIndex(path.join(this.dataDir, 'index.db'));
         this.db.init();
@@ -131,6 +149,7 @@ export class TelegramFS {
         this.fileByLogicalPath = new Map();
         this.implicitDirs = new Set(['']);
         this.childrenByDir = new Map();
+        this.xattrs = new Map();
         this._refreshPathIndex();
     }
 
@@ -185,6 +204,10 @@ export class TelegramFS {
         return this.fileByLogicalPath.get(logicalPath);
     }
 
+    _exists(logicalPath) {
+        return this._isDirectory(logicalPath) || this.writeBuffers.has(logicalPath) || Boolean(this._file(logicalPath));
+    }
+
     _newWritePath(logicalPath) {
         const dir = path.join(this.dataDir, 'fuse-writes');
         fs.mkdirSync(dir, { recursive: true });
@@ -220,13 +243,17 @@ export class TelegramFS {
 
         if (this._isDirectory(logical)) {
             return cb(0, {
-                mtime: new Date(),
-                atime: new Date(),
-                ctime: new Date(),
+                mtime: this.mountStartedAt,
+                atime: this.mountStartedAt,
+                ctime: this.mountStartedAt,
                 size: 4096,
                 mode: 0o40755, // directory
                 uid: process.getuid?.() || 0,
-                gid: process.getgid?.() || 0
+                gid: process.getgid?.() || 0,
+                nlink: 2,
+                ino: pathInode(logical),
+                blksize: 4096,
+                blocks: 1
             });
         }
 
@@ -241,7 +268,10 @@ export class TelegramFS {
                 size: stats.size,
                 mode: 0o100644, // regular file
                 uid: process.getuid?.() || 0,
-                gid: process.getgid?.() || 0
+                gid: process.getgid?.() || 0,
+                ino: pathInode(logical),
+                blksize: 4096,
+                blocks: Math.ceil(stats.size / 512)
             });
         }
 
@@ -259,7 +289,10 @@ export class TelegramFS {
             size: file.original_size,
             mode: 0o100644, // regular file
             uid: process.getuid?.() || 0,
-            gid: process.getgid?.() || 0
+            gid: process.getgid?.() || 0,
+            ino: pathInode(logical),
+            blksize: 4096,
+            blocks: Math.ceil(file.original_size / 512)
         });
     }
 
@@ -276,6 +309,109 @@ export class TelegramFS {
             names.add(name);
         }
         return cb(0, [...names].sort((a, b) => a.localeCompare(b)));
+    }
+
+    /** Report the local staging disk because Telegram exposes no storage quota. */
+    statfs(filepath, cb) {
+        try {
+            const stats = typeof fs.statfsSync === 'function' ? fs.statfsSync(this.dataDir) : null;
+            const fileCount = this.filePaths.size + this.virtualDirs.size + this.writeBuffers.size + 1;
+            return cb(0, {
+                bsize: fuseStatNumber(stats?.bsize, 4096),
+                frsize: fuseStatNumber(stats?.bsize, 4096),
+                blocks: fuseStatNumber(stats?.blocks, 1),
+                bfree: fuseStatNumber(stats?.bfree, 1),
+                bavail: fuseStatNumber(stats?.bavail, 1),
+                files: fuseStatNumber(stats?.files, fileCount),
+                ffree: fuseStatNumber(stats?.ffree, 0),
+                favail: fuseStatNumber(stats?.ffree, 0),
+                fsid: 0,
+                flag: 0,
+                namemax: 255
+            });
+        } catch (error) {
+            return cb(Fuse.EIO);
+        }
+    }
+
+    access(filepath, mode, cb) {
+        let logical;
+        try { logical = this._logical(filepath, true); } catch { return cb(Fuse.ENOENT); }
+        return cb(this._exists(logical) ? 0 : Fuse.ENOENT);
+    }
+
+    opendir(filepath, flags, cb) {
+        let logical;
+        try { logical = this._logical(filepath, true); } catch { return cb(Fuse.ENOENT); }
+        return this._isDirectory(logical) ? cb(0, pathInode(logical)) : cb(Fuse.ENOTDIR);
+    }
+
+    releasedir(filepath, fd, cb) {
+        return cb(0);
+    }
+
+    flush(filepath, fd, cb) {
+        return cb(0);
+    }
+
+    fsync(filepath, datasync, fd, cb) {
+        return cb(0);
+    }
+
+    fsyncdir(filepath, datasync, fd, cb) {
+        return cb(0);
+    }
+
+    utimens(filepath, atime, mtime, cb) {
+        let logical;
+        try { logical = this._logical(filepath, true); } catch { return cb(Fuse.ENOENT); }
+        return cb(this._exists(logical) ? 0 : Fuse.ENOENT);
+    }
+
+    chmod(filepath, mode, cb) {
+        let logical;
+        try { logical = this._logical(filepath, true); } catch { return cb(Fuse.ENOENT); }
+        return cb(this._exists(logical) ? 0 : Fuse.ENOENT);
+    }
+
+    chown(filepath, uid, gid, cb) {
+        let logical;
+        try { logical = this._logical(filepath, true); } catch { return cb(Fuse.ENOENT); }
+        return cb(this._exists(logical) ? 0 : Fuse.ENOENT);
+    }
+
+    getxattr(filepath, name, position, cb) {
+        let logical;
+        try { logical = this._logical(filepath, true); } catch { return cb(Fuse.ENOENT); }
+        if (!this._exists(logical)) return cb(Fuse.ENOENT);
+        const value = this.xattrs.get(logical)?.get(name);
+        return value ? cb(0, Buffer.from(value)) : cb(Fuse.ENODATA);
+    }
+
+    setxattr(filepath, name, value, position, flags, cb) {
+        let logical;
+        try { logical = this._logical(filepath, true); } catch { return cb(Fuse.ENOENT); }
+        if (!this._exists(logical)) return cb(Fuse.ENOENT);
+        if (!this.xattrs.has(logical)) this.xattrs.set(logical, new Map());
+        this.xattrs.get(logical).set(name, Buffer.from(value));
+        return cb(0);
+    }
+
+    listxattr(filepath, cb) {
+        let logical;
+        try { logical = this._logical(filepath, true); } catch { return cb(Fuse.ENOENT); }
+        if (!this._exists(logical)) return cb(Fuse.ENOENT);
+        return cb(0, [...(this.xattrs.get(logical)?.keys() || [])]);
+    }
+
+    removexattr(filepath, name, cb) {
+        let logical;
+        try { logical = this._logical(filepath, true); } catch { return cb(Fuse.ENOENT); }
+        if (!this._exists(logical)) return cb(Fuse.ENOENT);
+        const attributes = this.xattrs.get(logical);
+        if (!attributes?.delete(name)) return cb(Fuse.ENODATA);
+        if (attributes.size === 0) this.xattrs.delete(logical);
+        return cb(0);
     }
 
     /**
@@ -398,6 +534,7 @@ export class TelegramFS {
 
             // Invalidate cache
             this.invalidateCache(logical);
+            this.xattrs.delete(logical);
 
             return cb(0);
         } catch (err) {
@@ -517,6 +654,11 @@ export class TelegramFS {
             fileCache.delete(oldName);
             fileCache.set(newName, cached);
         }
+        const attributes = this.xattrs.get(oldName);
+        if (attributes) {
+            this.xattrs.delete(oldName);
+            this.xattrs.set(newName, attributes);
+        }
 
         return cb(0);
     }
@@ -539,6 +681,7 @@ export class TelegramFS {
             return cb(Fuse.ENOTEMPTY || Fuse.EINVAL);
         }
         this.virtualDirs.delete(logical);
+        this.xattrs.delete(logical);
         return cb(0);
     }
 
@@ -679,10 +822,32 @@ export class TelegramFS {
         }
     }
 
+    _mountOptions() {
+        return {
+            debug: false,
+            force: true,
+            mkdir: true,
+            allowOther: this.allowOther,
+            defaultPermissions: true,
+            fsname: 'tas',
+            subtype: 'tas'
+        };
+    }
+
     /**
      * Mount the filesystem
      */
     mount() {
+        if (this.allowOther && process.platform === 'linux' && (process.getuid?.() || 0) !== 0) {
+            let fuseConfig = '';
+            try { fuseConfig = fs.readFileSync('/etc/fuse.conf', 'utf8'); } catch { }
+            if (!/^\s*user_allow_other\s*$/m.test(fuseConfig)) {
+                throw new Error(
+                    '--allow-other requires user_allow_other on its own line in /etc/fuse.conf'
+                );
+            }
+        }
+
         // Ensure mount point exists
         if (!fs.existsSync(this.mountPoint)) {
             fs.mkdirSync(this.mountPoint, { recursive: true });
@@ -691,11 +856,25 @@ export class TelegramFS {
         const ops = {
             getattr: this.getattr.bind(this),
             readdir: this.readdir.bind(this),
+            statfs: this.statfs.bind(this),
+            access: this.access.bind(this),
+            opendir: this.opendir.bind(this),
+            releasedir: this.releasedir.bind(this),
             open: this.open.bind(this),
             read: this.read.bind(this),
             write: this.write.bind(this),
             create: this.create.bind(this),
             release: this.release.bind(this),
+            flush: this.flush.bind(this),
+            fsync: this.fsync.bind(this),
+            fsyncdir: this.fsyncdir.bind(this),
+            utimens: this.utimens.bind(this),
+            chmod: this.chmod.bind(this),
+            chown: this.chown.bind(this),
+            getxattr: this.getxattr.bind(this),
+            setxattr: this.setxattr.bind(this),
+            listxattr: this.listxattr.bind(this),
+            removexattr: this.removexattr.bind(this),
             unlink: this.unlink.bind(this),
             rename: this.rename.bind(this),
             mkdir: this.mkdir.bind(this),
@@ -704,11 +883,7 @@ export class TelegramFS {
             ftruncate: this.ftruncate.bind(this)
         };
 
-        this.fuse = new Fuse(this.mountPoint, ops, {
-            debug: false,
-            force: true,
-            mkdir: true
-        });
+        this.fuse = new Fuse(this.mountPoint, ops, this._mountOptions());
 
         return new Promise((resolve, reject) => {
             this.fuse.mount((err) => {

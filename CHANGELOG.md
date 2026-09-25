@@ -2,6 +2,14 @@
 
 All notable changes to TAS (Telegram as Storage) will be documented in this file.
 
+## [3.0.3] - 2026-09-25
+
+### Fixed — desktop and SMB mount interoperability (#3)
+- **Complete directory surface** — FUSE now implements `statfs`, `access`, `opendir`, `releasedir`, flush/sync callbacks, stable inode metadata, and session extended attributes used by Linux file managers and Samba.
+- **Secure shared mounts** — `tas mount <path> --allow-other` opts into access by other local users and services. On Linux TAS requires `user_allow_other` in `/etc/fuse.conf`; private single-user mounts remain the default.
+- **Usable capacity reporting** — desktop clients receive real local staging-disk statistics rather than an empty or unsupported filesystem response. This is not presented as a Telegram quota.
+- **Version consistency** — the CLI banner now matches the package version.
+
 ## [3.0.2] - 2026-09-25
 
 ### Fixed — Apple Silicon install recovery

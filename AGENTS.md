@@ -29,7 +29,7 @@ TAS (Telegram as Storage) is an experimental Node.js CLI that uses Telegram Bot 
 
 ## Testing
 - `npm test` runs all tests via `node --test tests/*.test.js`
-- 101 tests cover encryption, WAS1 headers, compression, modern macFUSE detection, nested FUSE paths (including 60k entries), schema migrations, multi-bot routing, resumable state, rate queues, manifests, uploads, tags, sync DB, and share DB
+- 104 tests cover encryption, WAS1 headers, compression, modern macFUSE detection, desktop and SMB FUSE compatibility, nested FUSE paths (including 60k entries), schema migrations, multi-bot routing, resumable state, rate queues, manifests, uploads, tags, sync DB, and share DB
 - Telegram network tests use local fakes; the suite never requires a live bot token
 
 ## Common Pitfalls

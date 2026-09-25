@@ -31,3 +31,7 @@ No. Each chunk has one owning bot. TAS records that bot so reads and deletes rou
 ## Does mount work on macOS?
 
 Yes with current macFUSE, Xcode Command Line Tools, and a locally rebuilt native addon. TAS never installs or replaces macFUSE; its install hook selects the system `libfuse` and compiles the optional addon for the active CPU. Run `tas doctor` before use. If the real mount/readdir/unmount smoke test does not pass, do not mount data.
+
+## Why can I list a mount locally but not open its Samba share?
+
+FUSE mounts are private to the mounting user by default. Add `user_allow_other` to `/etc/fuse.conf`, then mount with `tas mount /mnt/tg-drive --allow-other`. TAS keeps this opt-in because it grants other local users and services access subject to Unix permissions. Version 3.0.3 also implements the filesystem statistics, directory handles, sync operations, and extended attributes expected by desktop and SMB clients.

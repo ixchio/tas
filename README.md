@@ -18,7 +18,7 @@
   <a href="https://github.com/ixchio/tas/network/members"><img src="https://img.shields.io/github/forks/ixchio/tas?style=social" alt="GitHub Forks"></a>
   <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen?logo=node.js" alt="Node.js >= 18">
   <img src="https://img.shields.io/badge/encryption-AES--256--GCM-blueviolet?logo=shield" alt="AES-256-GCM">
-  <img src="https://img.shields.io/badge/tests-101%20passing-success" alt="101 Tests Passing">
+  <img src="https://img.shields.io/badge/tests-104%20passing-success" alt="104 Tests Passing">
 </p>
 
 <p align="center">
@@ -114,6 +114,15 @@ tas unmount ~/cloud          # Clean unmount when done
 ```
 
 > **Native FUSE is verified, not assumed:** Linux needs `fuse`/`libfuse-dev`. macOS uses current macFUSE and rebuilds the optional native addon against the installed system library on first install. Install Xcode Command Line Tools before TAS, then run `tas doctor`; mount is available only when its real mount → readdir → unmount smoke test passes.
+
+Desktop file managers work with the normal private mount. Samba and other services run under a different local identity, so shared access must be enabled explicitly:
+
+```bash
+# Add this exact line to /etc/fuse.conf first: user_allow_other
+tas mount /mnt/tg-drive --allow-other
+```
+
+`--allow-other` exposes the mount to other local users subject to Unix permissions. Do not enable it on an untrusted multi-user host.
 
 ---
 
@@ -353,6 +362,7 @@ tas bot add|list|enable|disable|remove  # 🤖 Manage experimental bot pool
 ```bash
 # FUSE Mount (Linux/libfuse or macOS/current macFUSE)
 tas mount <path>                  # Mount Telegram storage as a local folder
+tas mount <path> --allow-other    # Opt in to Samba/service access
 tas unmount <path>                # Clean unmount
 
 # Dropbox-style Folder Sync

@@ -816,6 +816,7 @@ program
     .command('mount <mountpoint>')
     .description('🔥 Mount Telegram storage as a local folder (Linux FUSE or current macFUSE)')
     .option('-p, --password <password>', 'Encryption password (uses TAS_PASSWORD env var if not provided)')
+    .option('--allow-other', 'Allow other local users and services such as Samba to access the mount')
     .action(async (mountpoint, options) => {
         console.log(chalk.cyan('\n🗂️  Mounting Telegram as filesystem...\n'));
 
@@ -836,7 +837,8 @@ program
                 dataDir: DATA_DIR,
                 password,
                 config,
-                mountPoint: absMount
+                mountPoint: absMount,
+                allowOther: options.allowOther
             });
 
             await tfs.initialize();
@@ -851,6 +853,9 @@ program
             console.log(chalk.dim(`   cat ${absMount}/file.txt  # Read`));
             console.log(chalk.dim(`   rm ${absMount}/file.pdf   # Delete`));
             console.log();
+            if (options.allowOther) {
+                console.log(chalk.yellow('Shared access is enabled; Unix file permissions still apply'));
+            }
             console.log(chalk.yellow('Press Ctrl+C to unmount'));
 
             // Handle graceful shutdown
@@ -873,6 +878,7 @@ program
             console.log(chalk.dim('  Ubuntu/Debian: sudo apt install fuse libfuse-dev'));
             console.log(chalk.dim('  Fedora: sudo dnf install fuse fuse-devel'));
             console.log(chalk.dim('  macOS: install current macFUSE and Xcode Command Line Tools, then reinstall TAS\n'));
+            console.log(chalk.dim('  Samba: enable user_allow_other in /etc/fuse.conf and mount with --allow-other\n'));
             process.exit(1);
         }
     });
