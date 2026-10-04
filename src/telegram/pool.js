@@ -75,6 +75,11 @@ export class TelegramPool {
         return this.clientPromises.get(normalizedId);
     }
 
+    usesCustomApi(botId = null) {
+        const normalizedId = this._normalizeBotId(botId);
+        return Boolean(this.botById.get(normalizedId)?.customApiUrl);
+    }
+
     async sendFile(filePath, caption = '', options = {}) {
         const botId = options.botId || this.selectBotId(options.routingKey, options.chunkIndex || 0);
         const client = await this._getClient(botId);

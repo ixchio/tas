@@ -404,6 +404,63 @@ export class FileIndex {
   }
 
   /**
+   * Files with a full chunk set are the only records that can be mounted.
+   * Older interrupted uploads can leave a files row with no chunks or an
+   * incomplete chunk set; keeping them out of readdir avoids repeated EIOs
+   * from file managers and SMB scanners.
+   */
+  listReadableFiles() {
+    return this.db.prepare(`
+      SELECT f.*
+      FROM files f
+      JOIN (
+        SELECT file_id, COUNT(*) AS actual_chunks
+        FROM chunks
+        GROUP BY file_id
+      ) c ON c.file_id = f.id
+      WHERE f.chunks > 0 AND c.actual_chunks = f.chunks
+      ORDER BY f.created_at DESC
+    `).all();
+  }
+
+  /** Summarize damaged legacy index rows without modifying anything. */
+  getFileIntegritySummary() {
+    return this.db.prepare(`
+      SELECT
+        SUM(CASE WHEN actual_chunks = 0 THEN 1 ELSE 0 END) AS zero_chunk_files,
+        SUM(CASE WHEN actual_chunks != expected_chunks THEN 1 ELSE 0 END) AS incomplete_files
+      FROM (
+        SELECT f.id, f.chunks AS expected_chunks, COUNT(c.id) AS actual_chunks
+        FROM files f
+        LEFT JOIN chunks c ON c.file_id = f.id
+        GROUP BY f.id
+      )
+    `).get();
+  }
+
+  getIncompleteFileRecords() {
+    return this.db.prepare(`
+      SELECT f.*, COUNT(c.id) AS actual_chunks
+      FROM files f
+      LEFT JOIN chunks c ON c.file_id = f.id
+      GROUP BY f.id
+      HAVING actual_chunks != f.chunks
+      ORDER BY f.created_at ASC
+    `).all();
+  }
+
+  getZeroChunkFiles() {
+    return this.db.prepare(`
+      SELECT f.*
+      FROM files f
+      LEFT JOIN chunks c ON c.file_id = f.id
+      GROUP BY f.id
+      HAVING COUNT(c.id) = 0
+      ORDER BY f.created_at ASC
+    `).all();
+  }
+
+  /**
    * List all files
    */
   listAll() {

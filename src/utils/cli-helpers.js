@@ -120,6 +120,7 @@ export function getBotEntries(config) {
             botToken: config.botToken,
             chatId: config.chatId,
             username: config.username,
+            customApiUrl: config.customApiUrl,
             enabled: true,
             createdAt: config.createdAt
         }];

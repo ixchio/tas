@@ -18,7 +18,7 @@
   <a href="https://github.com/ixchio/tas/network/members"><img src="https://img.shields.io/github/forks/ixchio/tas?style=social" alt="GitHub Forks"></a>
   <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen?logo=node.js" alt="Node.js >= 18">
   <img src="https://img.shields.io/badge/encryption-AES--256--GCM-blueviolet?logo=shield" alt="AES-256-GCM">
-  <img src="https://img.shields.io/badge/tests-104%20passing-success" alt="104 Tests Passing">
+  <img src="https://img.shields.io/badge/tests-113%20passing-success" alt="113 Tests Passing">
 </p>
 
 <p align="center">
@@ -149,6 +149,7 @@ tas bot list                       # IDs, state, chat, and dependent chunk count
 tas bot disable archive-2          # Stop new writes; old chunks remain readable
 tas bot enable archive-2
 tas bot remove archive-2           # Refuses unless no data depends on it
+tas bot endpoint http://127.0.0.1:8081 --password "$TAS_PASSWORD"  # Use a local Bot API server for legacy reads
 ```
 
 > **Use at your own risk.** Multiple bots do not guarantee more quota, durability, ban avoidance, or Terms compliance. Do not use this feature to evade Telegram limits. All bots remain under Telegram's control, so this is distribution—not redundancy.
@@ -160,9 +161,23 @@ Every completed storage mutation publishes a gzip-compressed, AES-256-GCM-authen
 ```bash
 tas index backup                 # Publish a fresh encrypted recovery point
 tas index rebuild               # Authenticate and rebuild index.db
+tas index repair                # Inspect incomplete legacy index records
 ```
 
 Keep `config.json` and your password separately: recovery cannot discover the latest manifest if both the database and config are lost.
+
+### Legacy chunk recovery
+
+Older TAS releases wrote chunks that the hosted Bot API can upload but cannot download through `getFile`. `tas doctor` reports those chunks and incomplete index records. Mounts hide incomplete entries instead of returning repeated read errors.
+
+For a self hosted Telegram Bot API server, configure the bot that owns the legacy chunks after the server is running:
+
+```bash
+tas bot endpoint http://127.0.0.1:8081 --bot primary --password "$TAS_PASSWORD"
+tas doctor --password "$TAS_PASSWORD"
+```
+
+The endpoint receives the bot token and file traffic, so it must be a server you administer. `tas index repair --remove-zero-chunk` removes only local records with no chunk metadata after confirmation. It leaves partial records untouched for manual recovery or `tas index rebuild`.
 
 ---
 
@@ -351,7 +366,9 @@ tas verify --deep                 # ✅ Download/decrypt/hash every file (slow a
 tas doctor                        # 🩺 Full system health check
 tas index backup                  # 🧯 Publish encrypted recovery manifest
 tas index rebuild                 # 🧯 Restore index.db from that manifest
+tas index repair                  # 🧯 Inspect incomplete legacy index records
 tas bot add|list|enable|disable|remove  # 🤖 Manage experimental bot pool
+tas bot endpoint <url>            # 🤖 Set a local Bot API endpoint for legacy reads
 ```
 
 </details>

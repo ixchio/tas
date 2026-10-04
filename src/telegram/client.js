@@ -48,6 +48,7 @@ export class TelegramClient {
         this.dataDir = dataDir;
         this.bot = null;
         this.chatId = null;
+        this.customApiUrl = null;
         this._lastSendTime = 0;
         this._sendQueue = Promise.resolve();
     }
@@ -58,6 +59,7 @@ export class TelegramClient {
      */
     async initialize(token, customApiUrl = null) {
         const options = { polling: false };
+        this.customApiUrl = customApiUrl || null;
         if (customApiUrl) {
             options.baseApiUrl = customApiUrl;
         }
@@ -86,7 +88,9 @@ export class TelegramClient {
      */
     async waitForChatId(timeout = 120000) {
         return new Promise((resolve, reject) => {
-            const pollingBot = new TelegramBot(this.bot.token, { polling: true });
+            const pollingOptions = { polling: true };
+            if (this.customApiUrl) pollingOptions.baseApiUrl = this.customApiUrl;
+            const pollingBot = new TelegramBot(this.bot.token, pollingOptions);
 
             const timer = setTimeout(() => {
                 pollingBot.stopPolling();

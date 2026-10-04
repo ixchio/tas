@@ -31,6 +31,7 @@ import {
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { HOSTED_BOT_API_DOWNLOAD_LIMIT } from './utils/chunk-readability.js';
 
 const DATA_DIR = process.env.TAS_DATA_DIR || path.join(os.homedir(), '.tas');
 
@@ -55,6 +56,7 @@ function migrateConfigToV3(rawConfig, password) {
         encryptedBotToken: bot.encryptedBotToken || encryptBotToken(bot.botToken, password),
         chatId: bot.chatId,
         username: bot.username,
+        ...(bot.customApiUrl ? { customApiUrl: bot.customApiUrl } : {}),
         enabled: bot.enabled !== false,
         createdAt: bot.createdAt || new Date().toISOString()
     }));
@@ -63,6 +65,20 @@ function migrateConfigToV3(rawConfig, password) {
     delete migrated.encryptedBotToken;
     delete migrated.chatId;
     return migrated;
+}
+
+function normalizeBotApiUrl(value) {
+    let url;
+    try {
+        url = new URL(value);
+    } catch {
+        throw new Error('Bot API URL must be a complete http:// or https:// URL');
+    }
+    if (!['http:', 'https:'].includes(url.protocol) || !url.hostname || url.username || url.password || url.search || url.hash) {
+        throw new Error('Bot API URL must be a plain http:// or https:// server URL');
+    }
+    url.pathname = url.pathname.replace(/\/+$/, '');
+    return url.toString().replace(/\/$/, '');
 }
 
 // Global error handlers — prevent silent crashes
@@ -103,6 +119,7 @@ program
     .description('Initialize TAS and connect to Telegram')
     .option('--token <token>', 'Telegram bot token (non-interactive / CI mode)')
     .option('--chat <chatId>', 'Telegram chat ID (non-interactive / CI mode)')
+    .option('--api-url <url>', 'Trusted local Bot API server URL')
     .option('-p, --password <password>', 'Encryption password (non-interactive / CI mode, or TAS_PASSWORD env)')
     .action(async (options) => {
         console.log(chalk.cyan('\n🚀 Initializing Telegram as Storage...\n'));
@@ -116,6 +133,7 @@ program
         let token = options.token;
         let password = options.password || envPassword;
         let presetChatId = options.chat;
+        let customApiUrl = options.apiUrl ? normalizeBotApiUrl(options.apiUrl) : null;
 
         const nonInteractive = Boolean(token && presetChatId && password);
 
@@ -182,7 +200,7 @@ program
         const client = new TelegramClient(DATA_DIR);
 
         try {
-            const botInfo = await client.initialize(token);
+            const botInfo = await client.initialize(token, customApiUrl);
             spinner.succeed(`Connected as @${botInfo.username}`);
 
             let userInfo;
@@ -209,6 +227,7 @@ program
                     encryptedBotToken: encryptedToken,
                     chatId: userInfo.chatId,
                     username: botInfo.username,
+                    ...(customApiUrl ? { customApiUrl } : {}),
                     enabled: true,
                     createdAt: new Date().toISOString()
                 }],
@@ -406,6 +425,40 @@ botCmd
         console.log(chalk.green(`✓ Removed unused bot "${id}"`));
     });
 
+botCmd
+    .command('endpoint [url]')
+    .description('Configure a trusted local Bot API server for a bot')
+    .option('--bot <id>', 'Bot ID to configure', 'primary')
+    .option('--clear', 'Remove the custom endpoint')
+    .option('-p, --password <password>', 'Vault password (or TAS_PASSWORD)')
+    .action(async (url, options) => {
+        if (options.clear && url) throw new Error('Pass either an endpoint URL or --clear');
+        if (!options.clear && !url) throw new Error('Pass a Bot API URL or use --clear');
+
+        const rawConfig = requireConfig(DATA_DIR);
+        const password = await getAndVerifyPassword(options.password, DATA_DIR);
+        const config = migrateConfigToV3(rawConfig, password);
+        const bot = config.bots.find(entry => entry.id === options.bot);
+        if (!bot) throw new Error(`Unknown bot ID: ${options.bot}`);
+
+        if (options.clear) {
+            delete bot.customApiUrl;
+            saveConfig(DATA_DIR, config);
+            console.log(chalk.green(`✓ Bot API endpoint cleared for "${bot.id}"`));
+            return;
+        }
+
+        const customApiUrl = normalizeBotApiUrl(url);
+        const resolved = resolveConfig(rawConfig, password);
+        const resolvedBot = resolved.bots.find(entry => entry.id === bot.id);
+        const client = new TelegramClient(DATA_DIR);
+        const info = await client.initialize(resolvedBot.botToken, customApiUrl);
+
+        bot.customApiUrl = customApiUrl;
+        saveConfig(DATA_DIR, config);
+        console.log(chalk.green(`✓ Local Bot API endpoint saved for "${bot.id}" (@${info.username})`));
+    });
+
 // ============== REMOTE INDEX RECOVERY ==============
 const indexCmd = program
     .command('index')
@@ -477,6 +530,73 @@ indexCmd
 
         console.log(chalk.green(`✓ Rebuilt index with ${manifest.files.length} files`));
         if (backupPath) console.log(chalk.dim(`  Previous index backup: ${backupPath}`));
+    });
+
+indexCmd
+    .command('repair')
+    .description('Inspect incomplete legacy index records')
+    .option('--remove-zero-chunk', 'Remove only records with no chunk metadata')
+    .option('--yes', 'Confirm removal without an interactive prompt')
+    .action(async (options) => {
+        const db = new FileIndex(path.join(DATA_DIR, 'index.db'));
+        db.init();
+        const incomplete = db.getIncompleteFileRecords();
+        const zeroChunk = incomplete.filter(file => file.actual_chunks === 0);
+        const partial = incomplete.filter(file => file.actual_chunks > 0);
+
+        if (incomplete.length === 0) {
+            console.log(chalk.green('\n✓ Index has no incomplete file records\n'));
+            db.close();
+            return;
+        }
+
+        console.log(chalk.yellow(`\n⚠ ${incomplete.length} incomplete file record(s) found\n`));
+        if (zeroChunk.length > 0) {
+            console.log(chalk.yellow(`  ${zeroChunk.length} record(s) have no chunk metadata and are hidden from mounts`));
+            for (const file of zeroChunk.slice(0, 20)) {
+                console.log(chalk.dim(`    ${file.filename}`));
+            }
+            if (zeroChunk.length > 20) console.log(chalk.dim(`    … and ${zeroChunk.length - 20} more`));
+        }
+        if (partial.length > 0) {
+            console.log(chalk.yellow(`  ${partial.length} record(s) have only some expected chunks`));
+            console.log(chalk.dim('    Leave these intact for manual recovery or a remote index rebuild'));
+        }
+
+        if (!options.removeZeroChunk) {
+            console.log(chalk.dim('\nRun `tas index repair --remove-zero-chunk` to remove only records with no Telegram chunk metadata\n'));
+            db.close();
+            return;
+        }
+
+        if (zeroChunk.length === 0) {
+            console.log(chalk.dim('\nNo zero-chunk records to remove\n'));
+            db.close();
+            return;
+        }
+
+        let confirmed = options.yes;
+        if (!confirmed) {
+            if (!process.stdin.isTTY) {
+                db.close();
+                throw new Error('Non-interactive repair requires --yes');
+            }
+            ({ confirmed } = await inquirer.prompt([{
+                type: 'confirm',
+                name: 'confirmed',
+                message: `Remove ${zeroChunk.length} local record(s) with no chunk metadata?`,
+                default: false
+            }]));
+        }
+
+        if (confirmed) {
+            const remove = db.db.transaction(records => {
+                for (const file of records) db.deleteFileCascade(file.id);
+            });
+            remove(zeroChunk);
+            console.log(chalk.green(`\n✓ Removed ${zeroChunk.length} zero-chunk index record(s)\n`));
+        }
+        db.close();
     });
 
 // ============== PUSH COMMAND ==============
@@ -1884,6 +2004,7 @@ program
         console.log(chalk.cyan('\n🩺 TAS Doctor — System Health Check\n'));
 
         const checks = [];
+        let configuredBots = [];
         const ok = (label) => { checks.push({ label, status: 'ok' }); console.log(chalk.green(`  ✓ ${label}`)); };
         const warn = (label, detail) => { checks.push({ label, status: 'warn', detail }); console.log(chalk.yellow(`  ⚠ ${label}`) + chalk.dim(` — ${detail}`)); };
         const fail = (label, detail) => { checks.push({ label, status: 'fail', detail }); console.log(chalk.red(`  ✗ ${label}`) + chalk.dim(` — ${detail}`)); };
@@ -1912,11 +2033,14 @@ program
                 else if (config.botToken) warn('Config v1 (plaintext token)', 'Re-run `tas init` to encrypt token');
                 else fail('Config invalid', 'Missing bot token');
 
-                const configuredBots = getBotEntries(config);
+                configuredBots = getBotEntries(config);
                 if (configuredBots.length > 0 && configuredBots.every(bot => bot.chatId !== undefined && bot.chatId !== null)) {
                     ok(`Storage chats configured: ${configuredBots.length}`);
                 }
                 else fail('Chat ID missing', 'Run `tas init`');
+
+                const endpointCount = configuredBots.filter(bot => bot.customApiUrl).length;
+                if (endpointCount > 0) ok(`Custom Bot API endpoint configured for ${endpointCount} bot(s)`);
             } catch (e) {
                 fail('Config corrupted', e.message);
             }
@@ -1932,12 +2056,31 @@ program
                 db.init();
                 const stats = db.getStats();
                 ok(`Database: ${stats.file_count} files, ${formatBytes(stats.total_original)} total`);
+                const integrity = db.getFileIntegritySummary();
+                const zeroChunkFiles = Number(integrity.zero_chunk_files || 0);
+                const incompleteFiles = Number(integrity.incomplete_files || 0);
+                const partialFiles = Math.max(0, incompleteFiles - zeroChunkFiles);
+                if (zeroChunkFiles > 0) {
+                    warn(
+                        `${zeroChunkFiles} file record(s) have no chunk metadata`,
+                        'They are hidden from mounts. Run `tas index repair` to inspect them.'
+                    );
+                }
+                if (partialFiles > 0) {
+                    warn(
+                        `${partialFiles} file record(s) have incomplete chunk sets`,
+                        'They are hidden from mounts. Preserve them for manual recovery or use `tas index rebuild`.'
+                    );
+                }
                 const oversized = db.db.prepare('SELECT COUNT(*) AS count FROM chunks WHERE size > ?')
-                    .get(20 * 1000 * 1000).count;
+                    .get(HOSTED_BOT_API_DOWNLOAD_LIMIT).count;
                 if (oversized > 0) {
+                    const endpointHint = configuredBots.some(bot => bot.customApiUrl)
+                        ? 'A custom endpoint is configured. Every bot that owns an oversized chunk must use one.'
+                        : 'Run a local Bot API server, then set it with `tas bot endpoint <url> --password <password>`.';
                     warn(
                         `${oversized} legacy chunk(s) exceed the hosted 20 MB getFile limit`,
-                        'They may require a local Bot API server to recover; new uploads use 19 MiB payloads'
+                        `${endpointHint} New uploads use 19 MiB payloads.`
                     );
                 } else {
                     ok('Chunk sizes are hosted Bot API round-trip safe');

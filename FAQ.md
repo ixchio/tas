@@ -12,6 +12,10 @@ Yes. A documented upload method is not a guarantee that a cloud-storage-style ap
 
 The hosted Bot API documents a larger upload allowance than its `getFile` download allowance. TAS keeps the payload at 19 MiB plus its 64-byte public routing header so newly uploaded chunks remain below the documented 20 MB read limit.
 
+## How do I read old chunks that exceed 20 MB?
+
+Run `tas doctor` first. If it reports oversized legacy chunks, operate a local Telegram Bot API server and configure the bot that owns those chunks with `tas bot endpoint http://127.0.0.1:8081 --bot primary --password "$TAS_PASSWORD"`. The server receives the bot token and file traffic, so use one you administer. `tas index repair` identifies old records with no or incomplete chunk metadata.
+
 ## What metadata can Telegram see?
 
 For new TAS 3 uploads, file content, user filename, original size, and remote recovery manifest contents are encrypted or omitted from public chunk fields. Telegram still observes bot/chat identity, timing, IP/network information, chunk count, encrypted sizes, message IDs, and generic TAS protocol captions. TAS 2.x chunks may contain filenames and original sizes in their legacy headers/captions.

@@ -31,6 +31,7 @@ import {
     isImplicitDirectory,
     parentLogicalPath
 } from '../utils/logical-path.js';
+import { getChunkReadabilityError } from '../utils/chunk-readability.js';
 
 // File cache for performance (avoid re-downloading)
 const fileCache = new Map();
@@ -184,7 +185,7 @@ export class TelegramFS {
             this.childrenByDir.get(dir).add(child);
         };
 
-        for (const file of this.db.listAll()) {
+        for (const file of this.db.listReadableFiles()) {
             const logical = normalizeLogicalPath(file.filename);
             this.filePaths.add(logical);
             if (!this.fileByLogicalPath.has(logical)) this.fileByLogicalPath.set(logical, file);
@@ -726,6 +727,13 @@ export class TelegramFS {
         }
 
         const chunks = this.db.getChunks(file.id);
+        const readError = getChunkReadabilityError(
+            file.filename,
+            chunks,
+            botId => this.client.usesCustomApi(botId),
+            file.chunks
+        );
+        if (readError) throw new Error(readError);
 
         const { readable } = await createDownloadPipeline({
             client: this.client,

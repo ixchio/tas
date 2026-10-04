@@ -132,4 +132,40 @@ describe('Incomplete upload detection (tas resume)', () => {
         assert.strictEqual(db.findByHash('e'.repeat(64)), undefined);
         assert.strictEqual(db.getChunks(fileId).length, 0);
     });
+
+    test('reports incomplete records and returns only files with complete chunk sets', () => {
+        const complete = db.addFile({
+            filename: 'complete.bin',
+            hash: '1'.repeat(64),
+            originalSize: 2,
+            storedSize: 2,
+            chunks: 1,
+            compressed: false
+        });
+        db.addChunk(complete, 0, 'complete-message', 2, 'complete-file');
+        db.addFile({
+            filename: 'zero.bin',
+            hash: '2'.repeat(64),
+            originalSize: 2,
+            storedSize: 2,
+            chunks: 1,
+            compressed: false
+        });
+        const partial = db.addFile({
+            filename: 'partial.bin',
+            hash: '3'.repeat(64),
+            originalSize: 3,
+            storedSize: 3,
+            chunks: 2,
+            compressed: false
+        });
+        db.addChunk(partial, 0, 'partial-message', 2, 'partial-file');
+
+        assert.deepStrictEqual(db.listReadableFiles().map(file => file.filename), ['complete.bin']);
+        assert.deepStrictEqual(db.getFileIntegritySummary(), {
+            zero_chunk_files: 1,
+            incomplete_files: 2
+        });
+        assert.deepStrictEqual(db.getZeroChunkFiles().map(file => file.filename), ['zero.bin']);
+    });
 });

@@ -13,6 +13,7 @@ import { TelegramPool } from '../telegram/pool.js';
 import { Encryptor } from '../crypto/encryption.js';
 import { Compressor } from '../utils/compression.js';
 import { createDownloadPipeline } from '../utils/download-stream.js';
+import { getChunkReadabilityError } from '../utils/chunk-readability.js';
 
 /**
  * Generate a secure random share token
@@ -262,9 +263,16 @@ export class ShareServer {
     /**
      * Stream a decrypted file from Telegram directly to the HTTP response
      */
-    async streamToResponse(fileRecord, res) {
-        const chunks = this.db.getChunks(fileRecord.id);
+    getReadabilityError(fileRecord, chunks = this.db.getChunks(fileRecord.id)) {
+        return getChunkReadabilityError(
+            fileRecord.filename,
+            chunks,
+            botId => this.client.usesCustomApi(botId),
+            fileRecord.chunks
+        );
+    }
 
+    async streamToResponse(fileRecord, res, chunks = this.db.getChunks(fileRecord.id)) {
         const { readable } = await createDownloadPipeline({
             client: this.client,
             chunks,
@@ -335,6 +343,10 @@ export class ShareServer {
                 return;
             }
 
+            const chunks = this.db.getChunks(fileRecord.id);
+            const readError = this.getReadabilityError(fileRecord, chunks);
+            if (readError) throw new Error(readError);
+
             // Determine content type
             const ext = path.extname(fileRecord.filename).toLowerCase();
             const contentTypes = {
@@ -361,7 +373,7 @@ export class ShareServer {
             // Download the file from Telegram, decrypt, decompress and stream directly to 'res'.
             // Count the download only AFTER a successful stream so an aborted
             // connection doesn't burn a single-use link.
-            await this.streamToResponse(fileRecord, res);
+            await this.streamToResponse(fileRecord, res, chunks);
             this.db.incrementShareDownload(token);
 
         } catch (err) {

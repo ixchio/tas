@@ -26,14 +26,18 @@ describe('FUSE nested logical paths', () => {
             backupManifest: async () => ({ version: 1 })
         });
 
-        const add = (filename, hash) => filesystem.db.addFile({
-            filename,
-            hash,
-            originalSize: 1,
-            storedSize: 1,
-            chunks: 1,
-            compressed: false
-        });
+        const add = (filename, hash) => {
+            const id = filesystem.db.addFile({
+                filename,
+                hash,
+                originalSize: 1,
+                storedSize: 1,
+                chunks: 1,
+                compressed: false
+            });
+            filesystem.db.addChunk(id, 0, `message-${id}`, 1, `file-${id}`);
+            return id;
+        };
         add('a.txt', 'a'.repeat(64));
         add('subdir/file.txt', 'b'.repeat(64));
         add('subdir/nested/deep.txt', 'c'.repeat(64));
@@ -130,5 +134,20 @@ describe('FUSE nested logical paths', () => {
         assert.ok(root.includes('subdir'));
         assert.ok(root.every(name => !name.includes('/')));
         assert.deepEqual(listLogicalChildren(paths, 'subdir'), ['file.txt']);
+    });
+
+    it('hides incomplete legacy file records from mount entries', async () => {
+        filesystem.db.addFile({
+            filename: 'broken-video.mp4',
+            hash: 'd'.repeat(64),
+            originalSize: 100,
+            storedSize: 100,
+            chunks: 1,
+            compressed: false
+        });
+        filesystem._refreshPathIndex();
+
+        const root = await callbackResult(cb => filesystem.readdir('/', cb));
+        assert.ok(!root.includes('broken-video.mp4'));
     });
 });

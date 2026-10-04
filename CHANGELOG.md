@@ -2,6 +2,17 @@
 
 All notable changes to TAS (Telegram as Storage) will be documented in this file.
 
+## Unreleased
+
+### Fixed — legacy read recovery (#3)
+- **Actionable legacy diagnostics** — `tas doctor` now reports zero-chunk records, incomplete chunk sets, and oversized legacy chunks with the exact recovery path.
+- **Safe mount surface** — incomplete index records no longer appear in FUSE mounts, preventing file managers and SMB clients from repeatedly opening entries that cannot be read.
+- **Clear read failures** — pull, share, and mount report missing chunks, partial chunk sets, and hosted download-limit failures before starting a download.
+
+### Added — local Bot API configuration
+- **`tas bot endpoint`** — configures and verifies a trusted local Bot API endpoint for the selected bot, including migration from v1 or v2 config to v3.
+- **`tas index repair`** — inspects incomplete legacy records and can remove only zero-chunk local records after explicit confirmation. Partial records are preserved for manual recovery or an encrypted index rebuild.
+
 ## [3.0.3] - 2026-09-25
 
 ### Fixed — desktop and SMB mount interoperability (#3)

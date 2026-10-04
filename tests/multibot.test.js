@@ -38,6 +38,19 @@ describe('Multi-bot configuration', () => {
         assert.equal(config.chatId, 10);
     });
 
+    it('keeps a configured custom Bot API endpoint with its owning bot', () => {
+        const bots = getBotEntries({
+            bots: [{
+                id: 'primary',
+                botToken: '1:first',
+                chatId: 10,
+                customApiUrl: 'http://127.0.0.1:8081'
+            }]
+        });
+
+        assert.equal(bots[0].customApiUrl, 'http://127.0.0.1:8081');
+    });
+
     it('routes deterministically across enabled bots only', () => {
         const bots = [
             { id: 'one', enabled: true },

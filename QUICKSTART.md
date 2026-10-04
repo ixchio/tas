@@ -32,6 +32,17 @@ tas index rebuild
 
 TAS updates an authenticated encrypted remote manifest after storage mutations. `rebuild` restores the files/chunks/tags mapping if `index.db` is lost; it cannot help if the manifest message, owning bot, config pointer, or password is also lost.
 
+## Legacy reads
+
+Old TAS uploads can contain chunks above the hosted Bot API download limit. Run `tas doctor` to identify them. A local Bot API server can read those chunks after you configure the owning bot:
+
+```bash
+tas bot endpoint http://127.0.0.1:8081 --bot primary --password "$TAS_PASSWORD"
+tas index repair
+```
+
+`tas index repair --remove-zero-chunk` removes only local records with no chunk metadata and always asks for confirmation. Partial records remain available for manual recovery or an index rebuild.
+
 ## Optional multi-bot pool
 
 ```bash

@@ -6,7 +6,7 @@ import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
 import fs from 'fs';
 import { FileIndex } from '../src/db/index.js';
-import { generateToken, parseDuration } from '../src/share/server.js';
+import { ShareServer, generateToken, parseDuration } from '../src/share/server.js';
 
 const TEST_DB_PATH = '/tmp/tas-test-share.db';
 
@@ -103,6 +103,15 @@ describe('Share DB Operations', () => {
     test('returns null for nonexistent token', () => {
         const share = db.getShare('nonexistent');
         assert.strictEqual(share, null);
+    });
+
+    test('preflights a shared file with missing chunk metadata', () => {
+        const server = new ShareServer({ dataDir: '/tmp', password: 'test', config: {} });
+        server.db = db;
+        server.client = { usesCustomApi: () => false };
+        const file = db.findByExactName('test-file.pdf');
+
+        assert.match(server.getReadabilityError(file), /no chunk metadata/);
     });
 
     test('can list all shares', () => {

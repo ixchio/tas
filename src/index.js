@@ -13,6 +13,7 @@ import { TelegramPool } from './telegram/pool.js';
 import { FileIndex } from './db/index.js';
 import { normalizeLogicalPath } from './utils/logical-path.js';
 import { backupRemoteManifest } from './manifest.js';
+import { getChunkReadabilityError } from './utils/chunk-readability.js';
 
 // The hosted Bot API can upload 50 MB but getFile downloads only up to 20 MB.
 // A 19 MiB encrypted payload plus the 64-byte TAS header is round-trip safe.
@@ -272,12 +273,15 @@ export async function retrieveFile(fileRecord, options) {
     const chunks = db.getChunks(fileRecord.id);
     db.close();
 
-    if (chunks.length === 0) {
-        throw new Error('No chunk metadata found for this file');
-    }
-
     // Connect to Telegram
     const client = telegramPool || new TelegramPool(dataDir, config.bots);
+    const readError = getChunkReadabilityError(
+        fileRecord.filename,
+        chunks,
+        botId => typeof client.usesCustomApi === 'function' && client.usesCustomApi(botId),
+        fileRecord.chunks
+    );
+    if (readError) throw new Error(readError);
 
     const encryptor = new Encryptor(password);
     const compressor = new Compressor();

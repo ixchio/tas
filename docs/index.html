@@ -263,6 +263,10 @@ tas list --json | jq '.[].filename'</pre>
           <p>TAS does not promise an unlimited file or vault size. It splits streams into 19 MiB payload chunks so hosted Bot API downloads remain possible; practical scale depends on local disk, SQLite, network time, Telegram limits, and provider retention.</p>
         </details>
         <details>
+          <summary>Can I recover older chunks above the hosted download limit?</summary>
+          <p>Run <code>tas doctor</code>. For legacy chunks, operate a local Telegram Bot API server and configure the owning bot with <code>tas bot endpoint http://127.0.0.1:8081 --bot primary</code>. The endpoint receives the bot token and file traffic, so it must be a server you administer.</p>
+        </details>
+        <details>
           <summary>Does this violate Telegram's ToS?</summary>
           <p>There is real policy risk. Telegram's current Bot Developer Terms restrict external cloud-storage use cases and rate-limit circumvention and permit termination. Multiple bots do not remove that risk. Use TAS at your own risk.</p>
         </details>
