@@ -26,12 +26,15 @@ import {
     resolveConfig,
     getBotEntries,
     encryptBotToken,
-    saveConfig
+    saveConfig,
+    readPrivatePasswordFile
 } from './utils/cli-helpers.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { HOSTED_BOT_API_DOWNLOAD_LIMIT } from './utils/chunk-readability.js';
+import { clearPendingUploads, resumePendingUploads } from './uploads/resume.js';
+import { resolveLogicalPath } from './utils/logical-path.js';
 
 const DATA_DIR = process.env.TAS_DATA_DIR || path.join(os.homedir(), '.tas');
 
@@ -91,14 +94,6 @@ process.on('uncaughtException', (err) => {
     console.error(chalk.red('\n✗ Fatal error:'), err.message);
     process.exit(1);
 });
-
-// Graceful shutdown on signals
-const cleanupAndExit = (signal) => {
-    console.log(chalk.dim(`\n${signal} received, shutting down...`));
-    process.exit(0);
-};
-process.on('SIGINT', () => cleanupAndExit('SIGINT'));
-process.on('SIGTERM', () => cleanupAndExit('SIGTERM'));
 
 const program = new Command();
 
@@ -709,8 +704,10 @@ program
             let fileRecord = db.findByHash(identifier) || db.findByName(identifier);
             if (!fileRecord) {
                 spinner.fail(`File not found: ${identifier}`);
+                db.close();
                 process.exit(1);
             }
+            db.close();
 
             spinner.stop();
 
@@ -725,7 +722,7 @@ program
             const { ProgressBar } = await import('./utils/progress.js');
             let progressBar = null;
 
-            const outputPath = output || options.output || fileRecord.filename;
+            const outputPath = output || options.output || resolveLogicalPath(process.cwd(), fileRecord.filename);
             await retrieveFile(fileRecord, {
                 password,
                 dataDir: DATA_DIR,
@@ -1224,6 +1221,7 @@ syncCmd
             db.init();
 
             const folders = db.getSyncFolders();
+            const pending = db.getPendingUploads();
 
             if (folders.length === 0) {
                 console.log(chalk.yellow('\n📭 No folders registered for sync.'));
@@ -1239,6 +1237,16 @@ syncCmd
                 console.log();
             }
 
+            if (pending.length > 0) {
+                console.log(chalk.yellow(`↻ Pending uploads: ${pending.length}`));
+                for (const upload of pending) {
+                    console.log(chalk.dim(
+                        `  ${upload.filename}: ${upload.uploaded_chunks}/${upload.total_chunks} chunks`
+                    ));
+                }
+                console.log(chalk.dim('  `tas sync start` resumes these automatically.\n'));
+            }
+
             db.close();
         } catch (err) {
             console.error(chalk.red('Error:'), err.message);
@@ -1250,13 +1258,28 @@ syncCmd
     .command('start')
     .description('Start syncing all registered folders')
     .option('-p, --password <password>', 'Encryption password (uses TAS_PASSWORD env var if not provided)')
+    .option('--password-file <path>', 'Read the encryption password from a private file')
     .option('-l, --limit <limit>', 'Bandwidth limit (e.g. 500k, 1m)')
+    .option('--no-resume', 'Skip automatic recovery of interrupted uploads')
     .action(async (options) => {
         console.log(chalk.cyan('\n🔄 Starting folder sync...\n'));
 
-        const rawConfig = requireConfig(DATA_DIR);
-        const password = await getAndVerifyPassword(options.password, DATA_DIR);
-        const config = resolveConfig(rawConfig, password);
+        let password;
+        let config;
+        try {
+            const rawConfig = requireConfig(DATA_DIR);
+            if (options.password && options.passwordFile) {
+                throw new Error('Use either --password or --password-file, not both');
+            }
+            const passwordOption = options.passwordFile
+                ? readPrivatePasswordFile(options.passwordFile)
+                : options.password;
+            password = await getAndVerifyPassword(passwordOption, DATA_DIR);
+            config = resolveConfig(rawConfig, password);
+        } catch (error) {
+            console.error(chalk.red('Sync failed:'), error.message);
+            process.exit(1);
+        }
 
         let limitRate = null;
         if (options.limit) {
@@ -1282,7 +1305,8 @@ syncCmd
                 dataDir: DATA_DIR,
                 password,
                 config,
-                limitRate
+                limitRate,
+                autoResume: options.resume
             });
 
             await syncEngine.initialize();
@@ -1310,6 +1334,26 @@ syncCmd
 
             syncEngine.on('manifest-error', ({ error }) => {
                 console.log(chalk.yellow(`  ⚠ Files synced, but remote recovery manifest failed: ${error}`));
+            });
+
+            syncEngine.on('resume-upload-start', ({ file }) => {
+                console.log(chalk.dim(`  ↻ Resuming: ${file}`));
+            });
+
+            syncEngine.on('resume-upload-complete', ({ file }) => {
+                console.log(chalk.green(`  ✓ Resumed: ${file}`));
+            });
+
+            syncEngine.on('resume-upload-error', ({ file, error }) => {
+                console.log(chalk.yellow(`  ⚠ Could not resume ${file}: ${error}`));
+            });
+
+            syncEngine.on('resume-complete', ({ completed, remaining }) => {
+                console.log(chalk.cyan(`↻ Recovery complete: ${completed} resumed, ${remaining} still pending`));
+            });
+
+            syncEngine.on('staging-pruned', ({ removed, reclaimedBytes }) => {
+                console.log(chalk.dim(`  Cleaned ${removed} stale staging director${removed === 1 ? 'y' : 'ies'} (${formatBytes(reclaimedBytes)})`));
             });
 
             syncEngine.on('watch-start', ({ folder }) => {
@@ -1389,7 +1433,13 @@ syncCmd
 
             for (const file of files) {
                 const folder = folders[0];
-                const targetPath = path.join(folder.local_path, file.filename);
+                let targetPath;
+                try {
+                    targetPath = resolveLogicalPath(folder.local_path, file.filename);
+                } catch (error) {
+                    console.log(chalk.red(`  ✗ Refusing unsafe logical path ${file.filename}: ${error.message}`));
+                    continue;
+                }
 
                 // Skip only when local content already matches the index
                 if (fs.existsSync(targetPath) && fs.statSync(targetPath).isFile()) {
@@ -1610,6 +1660,8 @@ program
     .command('resume')
     .description('Resume interrupted uploads')
     .option('-p, --password <password>', 'Encryption password (uses TAS_PASSWORD env var if not provided)')
+    .option('-y, --yes', 'Resume all pending uploads without prompting')
+    .option('--clear', 'Clear pending uploads and staged files instead of resuming')
     .action(async (options) => {
         try {
             const db = new FileIndex(path.join(DATA_DIR, 'index.db'));
@@ -1669,19 +1721,21 @@ program
 
             console.log();
 
-            // Ask if user wants to resume
-            const { action } = await inquirer.prompt([
-                {
-                    type: 'list',
-                    name: 'action',
-                    message: 'What would you like to do?',
-                    choices: [
-                        { name: 'Resume all pending uploads', value: 'resume' },
-                        { name: 'Clear all pending uploads', value: 'clear' },
-                        { name: 'Cancel', value: 'cancel' }
-                    ]
-                }
-            ]);
+            let action = options.clear ? 'clear' : options.yes ? 'resume' : null;
+            if (!action) {
+                ({ action } = await inquirer.prompt([
+                    {
+                        type: 'list',
+                        name: 'action',
+                        message: 'What would you like to do?',
+                        choices: [
+                            { name: 'Resume all pending uploads', value: 'resume' },
+                            { name: 'Clear all pending uploads', value: 'clear' },
+                            { name: 'Cancel', value: 'cancel' }
+                        ]
+                    }
+                ]));
+            }
 
             if (action === 'cancel') {
                 db.close();
@@ -1692,22 +1746,8 @@ program
                 const rawConfig = requireConfig(DATA_DIR);
                 const password = await getAndVerifyPassword(options.password, DATA_DIR);
                 const config = resolveConfig(rawConfig, password);
-                const client = new TelegramPool(DATA_DIR, config.bots);
-                for (const upload of pending) {
-                    // Clean up temp files
-                    const chunks = db.getPendingChunks(upload.id);
-                    for (const chunk of chunks) {
-                        if (chunk.uploaded && chunk.message_id) {
-                            try { await client.deleteMessage(chunk.message_id, chunk.bot_id || null); } catch { }
-                        }
-                        try { fs.unlinkSync(chunk.chunk_path); } catch (e) { }
-                    }
-                    if (upload.temp_dir) {
-                        try { fs.rmdirSync(upload.temp_dir); } catch (e) { }
-                    }
-                    db.deletePendingUpload(upload.id);
-                }
-                console.log(chalk.green('✓ Cleared all pending uploads'));
+                const result = await clearPendingUploads({ dataDir: DATA_DIR, config, db });
+                console.log(chalk.green(`✓ Cleared ${result.cleared} pending upload${result.cleared === 1 ? '' : 's'}`));
                 db.close();
                 return;
             }
@@ -1725,103 +1765,27 @@ program
             const config = resolveConfig(rawConfig, password);
             warnIfMultiBot(config);
 
-            // Connect to Telegram
-            const client = new TelegramPool(DATA_DIR, config.bots);
-            await client.initialize({ includeDisabled: false });
-            const supersededChunks = [];
-            let completedUploads = 0;
-
-            for (const upload of pending) {
-                console.log(chalk.cyan(`\n📤 Resuming: ${upload.filename}`));
-
-                const chunks = db.getPendingChunks(upload.id);
-                const pendingChunks = chunks.filter(c => !c.uploaded);
-
-                for (const chunk of pendingChunks) {
-                    if (!fs.existsSync(chunk.chunk_path)) {
-                        console.log(chalk.red(`  ✗ Chunk file missing: ${chunk.chunk_path}`));
-                        continue;
-                    }
-
-                    console.log(chalk.dim(`  ↑ Uploading chunk ${chunk.chunk_index + 1}/${upload.total_chunks}...`));
-
-                    const caption = `tas:c1:${upload.id}:${chunk.chunk_index + 1}/${upload.total_chunks}`;
-
-                    const result = await client.sendFile(chunk.chunk_path, caption, {
-                        botId: client.selectBotId(upload.hash, chunk.chunk_index),
-                        routingKey: upload.hash,
-                        chunkIndex: chunk.chunk_index
-                    });
-                    db.markChunkUploaded(
-                        upload.id,
-                        chunk.chunk_index,
-                        result.messageId.toString(),
-                        result.fileId,
-                        result.botId
-                    );
-
-                    // Clean up temp file
-                    fs.unlinkSync(chunk.chunk_path);
-                }
-
-                // All chunks uploaded - finalize
-                const allChunks = db.getPendingChunks(upload.id);
-                if (allChunks.every(c => c.uploaded)) {
-                    const existing = db.findByExactName(upload.filename);
-                    const existingChunks = existing ? db.getChunks(existing.id) : [];
-                    db.db.transaction(() => {
-                        const fileId = db.addFile({
-                            filename: upload.filename,
-                            hash: upload.hash,
-                            originalSize: upload.original_size,
-                            storedSize: upload.stored_size || Math.max(0, allChunks.reduce((sum, c) => sum + (c.size || 0), 0) - allChunks.length * 64),
-                            chunks: upload.total_chunks,
-                            compressed: Boolean(upload.compressed)
-                        });
-
-                        for (const chunk of allChunks) {
-                            db.addChunk(
-                                fileId,
-                                chunk.chunk_index,
-                                chunk.message_id,
-                                chunk.size || 0,
-                                chunk.file_telegram_id,
-                                chunk.bot_id || null
-                            );
-                        }
-                        if (existing) db.deleteFileCascade(existing.id);
-                        db.deletePendingUpload(upload.id);
-                    })();
-
-                    supersededChunks.push(...existingChunks);
-                    if (upload.temp_dir) {
-                        try { fs.rmdirSync(upload.temp_dir); } catch (e) { }
-                    }
-
-                    console.log(chalk.green(`  ✓ Completed: ${upload.filename}`));
-                    completedUploads++;
-                }
-            }
-
-            const remainingUploads = db.getPendingUploads().length;
+            const result = await resumePendingUploads({
+                dataDir: DATA_DIR,
+                password,
+                config,
+                db,
+                onUploadStart: upload => console.log(chalk.cyan(`\n📤 Resuming: ${upload.filename}`)),
+                onChunkStart: (upload, chunk) => console.log(
+                    chalk.dim(`  ↑ Uploading chunk ${chunk.chunk_index + 1}/${upload.total_chunks}...`)
+                ),
+                onUploadComplete: upload => console.log(chalk.green(`  ✓ Completed: ${upload.filename}`)),
+                onUploadError: (upload, error) => console.log(chalk.red(`  ✗ ${upload.filename}: ${error.message}`)),
+                onManifestError: error => console.log(
+                    chalk.yellow(`\n⚠ Uploads resumed, but recovery manifest failed: ${error.message}\n`)
+                )
+            });
             db.close();
-            let manifestUpdated = completedUploads === 0;
-            if (completedUploads > 0) {
-                try {
-                    await backupRemoteManifest({ dataDir: DATA_DIR, password, config, telegramPool: client });
-                    manifestUpdated = true;
-                    for (const chunk of supersededChunks) {
-                        try { await client.deleteMessage(chunk.message_id, chunk.bot_id || null); } catch { }
-                    }
-                } catch (error) {
-                    console.log(chalk.yellow(`\n⚠ Uploads resumed, but recovery manifest failed: ${error.message}\n`));
-                }
-            }
-            if (remainingUploads === 0) {
-                const suffix = manifestUpdated ? ' and recovery manifest updated' : '; run `tas index backup` to refresh recovery';
+            if (result.remaining === 0) {
+                const suffix = result.manifestUpdated ? ' and recovery manifest updated' : '';
                 console.log(chalk.green(`\n✨ All uploads resumed${suffix}!\n`));
             } else {
-                console.log(chalk.yellow(`\n⚠ ${remainingUploads} upload(s) remain incomplete. Missing staged chunks cannot be resumed.\n`));
+                console.log(chalk.yellow(`\n⚠ ${result.remaining} upload(s) remain incomplete. Review the errors above or clear them with \`tas resume --clear\`.\n`));
                 process.exitCode = 1;
             }
 

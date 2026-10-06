@@ -2,7 +2,25 @@
 
 All notable changes to TAS (Telegram as Storage) will be documented in this file.
 
-## Unreleased
+## [3.1.0] - 2026-10-06
+
+### Added — automatic sync recovery (#6)
+- **Resume before scan** — `tas sync start` now resumes recoverable `pending_uploads` before its initial folder scan, then rebuilds missing sync state from the completed durable record instead of uploading the same bytes twice. Use `--no-resume` only when recovery must be deferred.
+- **Automation-safe resume** — `tas resume --yes` skips the interactive action menu and `tas resume --clear` explicitly removes pending state and staged chunks.
+- **Visible recovery state** — `tas sync status` now lists pending logical paths and chunk progress instead of showing only watched folders.
+- **Stale staging cleanup** — sync startup removes TAS-owned staging directories that are older than 24 hours and no longer referenced by SQLite. Active and referenced uploads are never pruned.
+- **Private password files** — `tas sync start --password-file <path>` makes the shipped systemd service functional without putting the password in the process list. POSIX files must be owner-only.
+
+### Fixed — recovery and data safety
+- **One pending owner per logical path** — push, mount, and sync no longer create another staged upload when that path already has interrupted state waiting for recovery.
+- **Atomic downloads** — pull and sync-pull write to a private sibling file, verify SHA-256, and only then replace the destination. A network, decryption, or integrity failure leaves the previous local file intact.
+- **Contained restore paths** — default pulls and sync restores normalize stored logical paths and refuse any value that could escape the selected destination directory.
+- **Metadata-preserving replacements** — replacing a logical path now moves its tags and active share records to the new durable file row instead of silently deleting them through SQLite cascades.
+- **Complete resume preflight** — recovery verifies the full chunk set and local staged files before sending a byte, preventing damaged state from creating additional Telegram orphans.
+- **Graceful long-running shutdown** — removed the global signal handler that exited before mount, sync, and share could run their own cleanup handlers.
+- **Partial share failures** — a streaming error after HTTP headers are sent now destroys the partial response instead of attempting an invalid second status line.
+- **Concurrent share limits** — download slots are reserved atomically before streaming and released on failure, so simultaneous requests cannot exceed a one-use or capped share link.
+- **Systemd data access** — the service template now grants write access to the actual `~/.tas` state directory.
 
 ### Fixed — legacy read recovery (#3)
 - **Actionable legacy diagnostics** — `tas doctor` now reports zero-chunk records, incomplete chunk sets, and oversized legacy chunks with the exact recovery path.
@@ -12,6 +30,9 @@ All notable changes to TAS (Telegram as Storage) will be documented in this file
 ### Added — local Bot API configuration
 - **`tas bot endpoint`** — configures and verifies a trusted local Bot API endpoint for the selected bot, including migration from v1 or v2 config to v3.
 - **`tas index repair`** — inspects incomplete legacy records and can remove only zero-chunk local records after explicit confirmation. Partial records are preserved for manual recovery or an encrypted index rebuild.
+
+### Tests
+- **125 passing tests** cover automatic sync recovery, missing-stage preflight, duplicate-pending protection, stale staging cleanup, atomic download failure, contained restore paths, private password files, concurrent share limits, and partial HTTP streams alongside the existing crypto, FUSE, manifest, multi-bot, sync, and database suites.
 
 ## [3.0.3] - 2026-09-25
 

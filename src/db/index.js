@@ -296,6 +296,12 @@ export class FileIndex {
     stmt.run(fileId, chunkIndex, messageId, size, fileTelegramId, botId);
   }
 
+  /** Keep user metadata attached when a logical path is replaced in place. */
+  repointFileRelations(previousFileId, nextFileId) {
+    this.db.prepare('UPDATE tags SET file_id = ? WHERE file_id = ?').run(nextFileId, previousFileId);
+    this.db.prepare('UPDATE shares SET file_id = ? WHERE file_id = ?').run(nextFileId, previousFileId);
+  }
+
   /** Number of chunks that depend on a configured bot. */
   countChunksByBot(botId) {
     if (botId === 'primary') {
@@ -829,6 +835,14 @@ export class FileIndex {
     return stmt.all();
   }
 
+  /** Get the pending upload that owns an exact logical path. */
+  getPendingByExactName(filename) {
+    const stmt = this.db.prepare(`
+      SELECT * FROM pending_uploads WHERE filename = ? ORDER BY created_at DESC LIMIT 1
+    `);
+    return stmt.get(filename);
+  }
+
   /**
    * Get pending chunks for an upload
    */
@@ -912,6 +926,28 @@ export class FileIndex {
       UPDATE shares SET download_count = download_count + 1 WHERE token = ?
     `);
     stmt.run(token);
+  }
+
+  /** Atomically reserve one download slot so concurrent requests cannot exceed the limit. */
+  reserveShareDownload(token, now = new Date().toISOString()) {
+    const stmt = this.db.prepare(`
+      UPDATE shares
+      SET download_count = download_count + 1
+      WHERE token = ?
+        AND download_count < max_downloads
+        AND expires_at >= ?
+    `);
+    return stmt.run(token, now).changes === 1;
+  }
+
+  /** Return a reserved slot after a failed or aborted response. */
+  releaseShareDownload(token) {
+    const stmt = this.db.prepare(`
+      UPDATE shares
+      SET download_count = download_count - 1
+      WHERE token = ? AND download_count > 0
+    `);
+    return stmt.run(token).changes === 1;
   }
 
   /**

@@ -9,9 +9,9 @@ sudo cp systemd/tas-sync.service /etc/systemd/user/
 # 2. Edit the service file - replace USER with your username
 sudo nano /etc/systemd/user/tas-sync.service
 
-# 3. Create password file (for headless operation)
-echo "your-password" > ~/.tas-password
-chmod 600 ~/.tas-password
+# 3. Create a private one-line password file (for headless operation)
+install -m 600 /dev/null ~/.tas-password
+nano ~/.tas-password
 
 # 4. Enable and start the service
 systemctl --user daemon-reload
@@ -24,6 +24,8 @@ systemctl --user status tas-sync
 # 6. View logs
 journalctl --user -u tas-sync -f
 ```
+
+`tas sync start` automatically resumes valid pending uploads before scanning. The service template grants writes to `~/.tas` and `~/TelegramCloud`; change both paths if your TAS data directory or sync folder lives elsewhere.
 
 ## To stop the service:
 ```bash

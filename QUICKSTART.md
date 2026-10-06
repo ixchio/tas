@@ -21,7 +21,25 @@ tas pull report.pdf ./restored-report.pdf
 tas verify
 ```
 
-New data uses 19 MiB payload chunks so each stored document remains below the hosted Bot API's documented 20 MB `getFile` limit. Interrupted network-stage uploads can be continued with `tas resume`.
+New data uses 19 MiB payload chunks so each stored document remains below the hosted Bot API's documented 20 MB `getFile` limit. Interrupted network-stage uploads can be continued with `tas resume --yes`.
+
+## Folder sync and automatic recovery
+
+```bash
+tas sync add ~/Documents
+tas sync start
+```
+
+Sync startup resumes recoverable staged uploads before scanning the folder. It also removes TAS staging directories only when they are unreferenced and at least 24 hours old. Use `--no-resume` to defer recovery.
+
+For systemd or another headless service, keep the password out of the command line:
+
+```bash
+mkdir -p ~/.config/tas
+install -m 600 /dev/null ~/.config/tas/password
+printf '%s\n' 'your-password' > ~/.config/tas/password
+tas sync start --password-file ~/.config/tas/password
+```
 
 ## Recovery
 

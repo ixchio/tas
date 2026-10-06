@@ -132,10 +132,12 @@ Register a local folder and TAS watches it. Any new or changed file is automatic
 
 ```bash
 tas sync add ~/Documents        # Register ~/Documents for auto-sync
-tas sync start                  # Start the watcher (runs in background)
+tas sync start                  # Resume interrupted work, then start watching
 tas sync pull                   # Pull all synced files back down
 tas sync status                 # See what's queued / synced / pending
 ```
+
+`sync start` resumes staged uploads before its initial scan, so a restart does not create another copy of the same upload. Use `--no-resume` to defer recovery. For a service account, `--password-file ~/.config/tas/password` reads a one-line file that must be mode `600` on POSIX systems.
 
 ---
 
@@ -339,8 +341,9 @@ Reliability mechanisms implemented by TAS (not an SLA):
 |---|---|
 | **Exponential Backoff** | Auto-retry with jitter on Telegram 429 errors and network timeouts |
 | **Rate Limiting** | One serialized send queue per configured bot within a TAS process; parallel TAS processes and Telegram's dynamic limits still apply |
-| **Integrity Verification** | SHA-256 hash verified after every single download |
-| **Resume Uploads** | Network-stage chunks are staged on disk and persisted in `pending_uploads`; `tas resume` continues them |
+| **Integrity Verification** | Downloads are written to a private sibling file, SHA-256 verified, then atomically moved into place |
+| **Resume Uploads** | Network-stage chunks are persisted in SQLite; `tas sync start` resumes them automatically and `tas resume --yes` is available for scripts |
+| **Staging Cleanup** | Sync startup removes unreferenced TAS staging directories only after they are 24 hours old |
 | **Index Recovery** | Authenticated encrypted remote manifest; `tas index rebuild` restores file/chunk ownership |
 | **Graceful Shutdown** | SIGINT/SIGTERM handled; staged chunks and SQLite WAL reduce partial-state risk |
 | **Self-Diagnostics** | Checks config/database/chunk limits, all bots, and a real native FUSE smoke mount |
@@ -360,7 +363,9 @@ tas list [-l] [--json]            # 📋 List all stored files
 tas delete <file|hash>            # 🗑️  Remove from index (--hard removes from Telegram)
 tas status [--json]               # 📊 Storage stats & database health
 tas search <query> [-t tag]       # 🔍 Find by filename or tag
-tas resume                        # 🔄 Resume interrupted uploads
+tas resume                        # 🔄 Inspect and resume interrupted uploads
+tas resume --yes                  # 🔄 Resume without an interactive action menu
+tas resume --clear                # 🧹 Remove pending state and staged chunks
 tas verify                        # ✅ Check every Telegram file reference
 tas verify --deep                 # ✅ Download/decrypt/hash every file (slow and bandwidth-heavy)
 tas doctor                        # 🩺 Full system health check
@@ -384,7 +389,9 @@ tas unmount <path>                # Clean unmount
 
 # Dropbox-style Folder Sync
 tas sync add <folder>             # Register folder for auto-sync
-tas sync start                    # Start watching for changes
+tas sync start                    # Auto-resume pending uploads, then watch
+tas sync start --no-resume        # Start without processing pending uploads
+tas sync start --password-file <path> # Read a private one-line password file
 tas sync pull                     # Download all synced files locally
 tas sync status                   # Show sync queue and status
 ```
@@ -427,6 +434,7 @@ src/
 ├── cli.js                    # Commander-based CLI — all commands defined here
 ├── index.js                  # Core streaming upload/download pipeline
 ├── manifest.js               # Encrypted remote index backup/rebuild
+├── uploads/resume.js         # Non-interactive resume + stale staging cleanup
 ├── crypto/
 │   └── encryption.js         # AES-256-GCM + PBKDF2-SHA512 (600k iterations)
 ├── db/
@@ -502,11 +510,11 @@ Use TAS only at your own risk, do not use multiple bots to evade limits, follow 
 git clone https://github.com/ixchio/tas
 cd tas && npm install
 
-npm test               # Run all 97 tests (crypto, paths, migrations, multi-bot, resume, manifest, sync, shares)
+npm test               # Run all 125 tests (crypto, paths, recovery, downloads, FUSE, sync, shares)
 npm test -- --watch    # Watch mode for active development
 ```
 
-**Test coverage:** streaming encrypt/decrypt roundtrips · cross-API compat (buffer↔stream) · small-chunk stress testing · truncation/corruption error paths · Unicode filename handling · WAS1 binary header parsing · timing-safe comparison paths
+**Test coverage:** streaming encrypt/decrypt roundtrips · cross-API compat (buffer↔stream) · automatic resume and damaged staging · atomic download failures · private password files · truncation/corruption paths · Unicode filenames · WAS1 headers · FUSE and SMB compatibility
 
 PRs welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 

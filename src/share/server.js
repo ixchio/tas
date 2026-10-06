@@ -288,6 +288,7 @@ export class ShareServer {
      */
     async handleRequest(req, res) {
         const url = new URL(req.url, `http://${req.headers.host}`);
+        let reservedToken = null;
 
         // Route: GET /d/:token
         const downloadMatch = url.pathname.match(/^\/d\/([a-f0-9]+)$/);
@@ -347,6 +348,15 @@ export class ShareServer {
             const readError = this.getReadabilityError(fileRecord, chunks);
             if (readError) throw new Error(readError);
 
+            // Reserve before streaming so simultaneous requests cannot all pass
+            // the same stale counter check. A failed stream releases the slot.
+            if (!this.db.reserveShareDownload(token)) {
+                res.writeHead(410, { 'Content-Type': 'text/html' });
+                res.end(generateExpiredPage('used'));
+                return;
+            }
+            reservedToken = token;
+
             // Determine content type
             const ext = path.extname(fileRecord.filename).toLowerCase();
             const contentTypes = {
@@ -370,16 +380,20 @@ export class ShareServer {
                 'Content-Length': fileRecord.original_size
             });
 
-            // Download the file from Telegram, decrypt, decompress and stream directly to 'res'.
-            // Count the download only AFTER a successful stream so an aborted
-            // connection doesn't burn a single-use link.
+            // Download, decrypt, decompress, and stream directly to the client.
+            // Keep the reserved slot only after success; failure releases it.
             await this.streamToResponse(fileRecord, res, chunks);
-            this.db.incrementShareDownload(token);
+            reservedToken = null;
 
         } catch (err) {
+            if (reservedToken) this.db.releaseShareDownload(reservedToken);
             console.error('Share server error:', err.message);
-            res.writeHead(500, { 'Content-Type': 'text/plain' });
-            res.end('Internal server error');
+            if (res.headersSent) {
+                res.destroy(err);
+            } else {
+                res.writeHead(500, { 'Content-Type': 'text/plain' });
+                res.end('Internal server error');
+            }
         }
     }
 
@@ -391,8 +405,11 @@ export class ShareServer {
             this.server = http.createServer((req, res) => {
                 this.handleRequest(req, res).catch(err => {
                     console.error('Request error:', err);
-                    res.writeHead(500);
-                    res.end('Internal error');
+                    if (res.headersSent) res.destroy(err);
+                    else {
+                        res.writeHead(500);
+                        res.end('Internal error');
+                    }
                 });
             });
 

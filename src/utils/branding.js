@@ -14,7 +14,7 @@ export const LOGO = `
 `;
 
 export const TAGLINE = 'Telegram as Storage';
-export const VERSION = '3.0.4';
+export const VERSION = '3.1.0';
 
 /**
  * Print the TAS banner

@@ -28,6 +28,14 @@ TAS uses client-side AES-256-GCM and has no hosted TAS service, but it is not a 
 
 Run `tas index rebuild`. It downloads and authenticates the latest encrypted remote manifest referenced by `config.json`. Recovery still requires the password, config pointer, owning bot, and manifest message.
 
+## Do I need to run `tas resume` after every failed sync upload?
+
+No in TAS 3.1. `tas sync start` resumes valid staged uploads before its initial scan and repairs the matching local sync state after completion. Damaged staging is reported without sending more chunks. Use `tas resume` for an interactive view, `tas resume --yes` for scripts, or `tas resume --clear` when you intentionally want to discard pending work.
+
+## Why are temporary chunks still on disk?
+
+They are the durable state that makes upload recovery possible. Completed uploads remove their chunks immediately. Sync startup also prunes TAS-owned staging directories that are unreferenced by SQLite and older than 24 hours; it does not touch active, referenced, or unrelated directories.
+
 ## Does multi-bot mode provide redundancy?
 
 No. Each chunk has one owning bot. TAS records that bot so reads and deletes route correctly, but all bots remain controlled by Telegram. A disabled bot stays configured for old chunks; removal is refused while chunks or the manifest depend on it.

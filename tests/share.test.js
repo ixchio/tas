@@ -114,6 +114,40 @@ describe('Share DB Operations', () => {
         assert.match(server.getReadabilityError(file), /no chunk metadata/);
     });
 
+    test('destroys a partial response instead of writing a second HTTP status', async () => {
+        const token = generateToken();
+        db.addChunk(fileId, 0, 'message-1', 900, 'telegram-file-1', 'primary');
+        db.addShare(fileId, token, new Date(Date.now() + 86400000).toISOString(), 1);
+
+        const server = new ShareServer({ dataDir: '/tmp', password: 'test', config: {} });
+        server.db = db;
+        server.client = { usesCustomApi: () => false };
+        server.streamToResponse = async () => { throw new Error('stream failed after headers'); };
+
+        const response = {
+            headersSent: false,
+            writeCount: 0,
+            destroyedWith: null,
+            writeHead() { this.headersSent = true; this.writeCount++; },
+            end() { },
+            destroy(error) { this.destroyedWith = error; }
+        };
+        const originalError = console.error;
+        console.error = () => { };
+        try {
+            await server.handleRequest({
+                url: `/d/${token}?download=1`,
+                headers: { host: '127.0.0.1' }
+            }, response);
+        } finally {
+            console.error = originalError;
+        }
+
+        assert.strictEqual(response.writeCount, 1);
+        assert.match(response.destroyedWith.message, /stream failed/);
+        assert.strictEqual(db.getShare(token).download_count, 0);
+    });
+
     test('can list all shares', () => {
         const expires = new Date(Date.now() + 86400000).toISOString();
 
@@ -136,6 +170,18 @@ describe('Share DB Operations', () => {
 
         const share = db.getShare(token);
         assert.strictEqual(share.download_count, 2);
+    });
+
+    test('atomically reserves and releases limited download slots', () => {
+        const token = generateToken();
+        db.addShare(fileId, token, new Date(Date.now() + 86400000).toISOString(), 1);
+
+        assert.strictEqual(db.reserveShareDownload(token), true);
+        assert.strictEqual(db.reserveShareDownload(token), false);
+        assert.strictEqual(db.getShare(token).download_count, 1);
+        assert.strictEqual(db.releaseShareDownload(token), true);
+        assert.strictEqual(db.getShare(token).download_count, 0);
+        assert.strictEqual(db.reserveShareDownload(token), true);
     });
 
     test('can revoke a share', () => {

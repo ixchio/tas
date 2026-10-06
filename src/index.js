@@ -69,6 +69,13 @@ export async function processFile(filePath, options) {
         db.close();
         throw new Error(`A different file already exists at "${filename}"`);
     }
+    const pendingUpload = db.getPendingByExactName(filename);
+    if (pendingUpload) {
+        db.close();
+        throw new Error(
+            `An interrupted upload already owns "${filename}"; run \`tas resume\` or restart \`tas sync start\``
+        );
+    }
     const existingChunks = existingFile ? db.getChunks(existingFile.id) : [];
 
     // Prepare processing components
@@ -168,11 +175,13 @@ export async function processFile(filePath, options) {
     }
 
     onProgress?.('Connecting to Telegram...');
-    const client = telegramPool || new TelegramPool(dataDir, config.bots);
-    if (!telegramPool) await client.initialize({ includeDisabled: false });
-
+    let client = telegramPool;
     let uploadedBytes = 0;
     try {
+        if (!client) {
+            client = new TelegramPool(dataDir, config.bots);
+            await client.initialize({ includeDisabled: false });
+        }
         for (const staged of stagedChunks) {
             onProgress?.(`Uploading chunk ${staged.index + 1}/${totalChunks}...`);
             const botId = client.selectBotId(hash, staged.index);
@@ -209,21 +218,29 @@ export async function processFile(filePath, options) {
 
     const uploadedChunks = db.getPendingChunks(pendingId);
     let fileId;
-    db.db.transaction(() => {
-        fileId = db.addFile({ filename, hash, originalSize, storedSize: totalStoredSize, chunks: totalChunks, compressed });
-        for (const chunk of uploadedChunks) {
-            db.addChunk(
-                fileId,
-                chunk.chunk_index,
-                chunk.message_id,
-                chunk.size,
-                chunk.file_telegram_id,
-                chunk.bot_id || null
-            );
-        }
-        if (existingFile) db.deleteFileCascade(existingFile.id);
-        db.deletePendingUpload(pendingId);
-    })();
+    try {
+        db.db.transaction(() => {
+            fileId = db.addFile({ filename, hash, originalSize, storedSize: totalStoredSize, chunks: totalChunks, compressed });
+            for (const chunk of uploadedChunks) {
+                db.addChunk(
+                    fileId,
+                    chunk.chunk_index,
+                    chunk.message_id,
+                    chunk.size,
+                    chunk.file_telegram_id,
+                    chunk.bot_id || null
+                );
+            }
+            if (existingFile) {
+                db.repointFileRelations(existingFile.id, fileId);
+                db.deleteFileCascade(existingFile.id);
+            }
+            db.deletePendingUpload(pendingId);
+        })();
+    } catch (error) {
+        db.close();
+        throw new Error(`Upload reached Telegram but local finalization failed: ${error.message} (run \`tas resume\`)`);
+    }
 
     db.close();
 
@@ -299,19 +316,40 @@ export async function retrieveFile(fileRecord, options) {
         }
     });
 
-    const writeStream = fs.createWriteStream(outputPath);
+    const outputDir = path.dirname(outputPath);
+    fs.mkdirSync(outputDir, { recursive: true });
+    const tempOutput = path.join(
+        outputDir,
+        `.${path.basename(outputPath)}.tas-part-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`
+    );
+    const writeStream = fs.createWriteStream(tempOutput, { mode: 0o600 });
 
     onProgress?.('Decrypting, decompressing, and writing file...');
 
-    await pipeline(readable, writeStream);
+    let finalStats;
+    try {
+        await pipeline(readable, writeStream);
 
-    const finalStats = fs.statSync(outputPath);
+        finalStats = fs.statSync(tempOutput);
 
-    // Verify file integrity by comparing hash
-    onProgress?.('Verifying file integrity...');
-    const downloadedHash = await hashFile(outputPath);
-    if (fileRecord.hash && downloadedHash !== fileRecord.hash) {
-        throw new Error(`Integrity check failed: expected hash ${fileRecord.hash.substring(0, 12)}..., got ${downloadedHash.substring(0, 12)}...`);
+        // Verify before replacing an existing destination. Failed downloads
+        // must never destroy a known-good local copy.
+        onProgress?.('Verifying file integrity...');
+        const downloadedHash = await hashFile(tempOutput);
+        if (fileRecord.hash && downloadedHash !== fileRecord.hash) {
+            throw new Error(`Integrity check failed: expected hash ${fileRecord.hash.substring(0, 12)}..., got ${downloadedHash.substring(0, 12)}...`);
+        }
+
+        try {
+            fs.renameSync(tempOutput, outputPath);
+        } catch (error) {
+            if (!['EEXIST', 'EPERM'].includes(error.code)) throw error;
+            fs.rmSync(outputPath, { force: true });
+            fs.renameSync(tempOutput, outputPath);
+        }
+    } catch (error) {
+        try { fs.rmSync(tempOutput, { force: true }); } catch { }
+        throw error;
     }
 
     return {

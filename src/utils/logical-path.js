@@ -1,3 +1,5 @@
+import path from 'path';
+
 /** Normalize a TAS logical path to portable POSIX form. */
 export function normalizeLogicalPath(value, { allowRoot = false } = {}) {
     if (typeof value !== 'string' || value.includes('\0')) {
@@ -41,4 +43,16 @@ export function isImplicitDirectory(paths, directory) {
     if (dir === '') return true;
     const prefix = `${dir}/`;
     return paths.some(value => normalizeLogicalPath(value).startsWith(prefix));
+}
+
+/** Resolve a logical path beneath a local root without allowing traversal. */
+export function resolveLogicalPath(root, value) {
+    const logical = normalizeLogicalPath(value);
+    const resolvedRoot = path.resolve(root);
+    const destination = path.resolve(resolvedRoot, ...logical.split('/'));
+    const relative = path.relative(resolvedRoot, destination);
+    if (!relative || relative.startsWith(`..${path.sep}`) || relative === '..' || path.isAbsolute(relative)) {
+        throw new Error(`Logical path escapes destination root: ${value}`);
+    }
+    return destination;
 }

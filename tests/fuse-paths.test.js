@@ -4,7 +4,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { TelegramFS } from '../src/fuse/mount.js';
-import { listLogicalChildren, normalizeLogicalPath } from '../src/utils/logical-path.js';
+import { listLogicalChildren, normalizeLogicalPath, resolveLogicalPath } from '../src/utils/logical-path.js';
 
 function callbackResult(invoke) {
     return new Promise((resolve, reject) => {
@@ -124,6 +124,15 @@ describe('FUSE nested logical paths', () => {
     it('uses portable normalized logical paths for sync-style input', () => {
         assert.equal(normalizeLogicalPath('folder\\child\\file.txt'), 'folder/child/file.txt');
         assert.deepEqual(listLogicalChildren(['folder/a', 'folder/nested/b'], 'folder'), ['a', 'nested']);
+    });
+
+    it('resolves downloads beneath their destination root', () => {
+        assert.equal(
+            resolveLogicalPath(path.join(tempDir, 'restore'), 'nested/file.txt'),
+            path.join(tempDir, 'restore', 'nested', 'file.txt')
+        );
+        assert.throws(() => resolveLogicalPath(tempDir, '../escape.txt'), /cannot contain/);
+        assert.throws(() => resolveLogicalPath(tempDir, '/'), /cannot be empty/);
     });
 
     it('keeps 60,000 flat entries valid when one nested sync path is present', () => {

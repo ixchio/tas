@@ -33,7 +33,7 @@
   <!-- HERO -->
   <section class="hero">
     <div class="w">
-      <p class="hero-sub">Open source · MIT · v3.0.3 · experimental</p>
+      <p class="hero-sub">Open source · MIT · v3.1.0 · experimental</p>
       <h1>Your files encrypted.<br>Transported through Telegram.<br>Indexed locally.</h1>
       <p class="hero-lead">TAS is an experimental local-first CLI with AES-256-GCM content encryption, resumable 19 MiB chunks, encrypted index recovery, native FUSE mount, sync, and multi-bot routing. It is not an unlimited-storage or durability service.</p>
       <div class="hero-actions">
@@ -78,11 +78,11 @@
         <div class="step"><span class="step-num">1</span><strong>Compress</strong><br>Gzip level 6. Skipped automatically for formats that don't benefit — mp4, zip, jpg, pdf, and about 30 others.</div>
         <div class="step"><span class="step-num">2</span><strong>Encrypt</strong><br>AES-256-GCM with a key derived from your password via PBKDF2-SHA512 at 600,000 iterations. Random 32-byte salt and 12-byte IV per file.</div>
         <div class="step"><span class="step-num">3</span><strong>Chunk</strong><br>Stage 19 MiB encrypted payloads with a 64-byte metadata-free public routing header, keeping each document below the hosted 20 MB getFile limit.</div>
-        <div class="step"><span class="step-num">4</span><strong>Upload</strong><br>Persist each result in SQLite, serialize sends per bot, retry transient failures, and continue staged network uploads with <code>tas resume</code>.</div>
+        <div class="step"><span class="step-num">4</span><strong>Upload</strong><br>Persist each result in SQLite, serialize sends per bot, retry transient failures, and automatically resume staged sync uploads after a restart.</div>
       </div>
 
       <div class="prose" style="margin-top: 40px">
-        <p>Downloads reverse the process. After decryption and decompression, TAS compares the SHA-256 hash of the output against the original. If a single bit is wrong, it tells you.</p>
+        <p>Downloads reverse the process into a private temporary file. TAS verifies the SHA-256 hash before replacing the destination, so a failed or corrupted transfer does not overwrite a good local copy.</p>
       </div>
 
       <div class="zk-box">
@@ -107,7 +107,7 @@
         </div>
         <div class="feat-item">
           <h3>Folder sync</h3>
-          <p>Register a directory with <code>tas sync add</code> and TAS watches for changes. New and modified files upload automatically with debouncing. Like Dropbox, except the backend is your Telegram bot.</p>
+          <p>Register a directory with <code>tas sync add</code> and TAS watches for changes. On startup it resumes valid staged uploads before scanning, then uploads new and modified files with debouncing.</p>
         </div>
         <div class="feat-item">
           <h3>Expiring share links</h3>
@@ -119,7 +119,7 @@
         </div>
         <div class="feat-item">
           <h3>Resume interrupted uploads</h3>
-          <p>Connection dropped at chunk 14 of 20? Run <code>tas resume</code>. TAS tracks which chunks uploaded successfully and picks up from chunk 15. Zero wasted bandwidth.</p>
+          <p>Connection dropped at chunk 14 of 20? <code>tas sync start</code> picks up from chunk 15 before its next scan. Use <code>tas resume --yes</code> for a standalone non-interactive recovery run.</p>
         </div>
         <div class="feat-item">
           <h3>JSON output</h3>
@@ -229,6 +229,9 @@ tas mount ~/cloud
 
 <span class="c"># Sync a directory</span>
 tas sync add ~/Documents && tas sync start
+
+<span class="c"># Headless sync without exposing the password in the process list</span>
+tas sync start --password-file ~/.config/tas/password
 
 <span class="c"># Share with an expiring link</span>
 tas share create document.pdf --expire 1h

@@ -15,7 +15,7 @@ StandardError=journal
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/USER/tas/data /home/USER/TelegramCloud
+ReadWritePaths=/home/USER/.tas /home/USER/TelegramCloud
 
 [Install]
 WantedBy=default.target

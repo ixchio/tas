@@ -44,7 +44,25 @@ describe('Production upload pipeline', () => {
         assert.equal(db.getPendingUploads().length, 0);
         const first = db.findByExactName('nested/secret-name.txt');
         assert.equal(db.getChunks(first.id)[0].bot_id, 'one');
+        db.addTag(first.id, 'important');
+        const shareToken = 'a'.repeat(32);
+        db.addShare(first.id, shareToken, new Date(Date.now() + 60_000).toISOString(), 2);
         db.close();
+
+        fs.writeFileSync(source, 'updated production upload pipeline data');
+        await processFile(source, {
+            ...options,
+            customName: 'nested/secret-name.txt',
+            replaceExisting: true
+        });
+
+        const updatedDb = new FileIndex(path.join(tempDir, 'index.db'));
+        updatedDb.init();
+        const updated = updatedDb.findByExactName('nested/secret-name.txt');
+        assert.notEqual(updated.id, first.id);
+        assert.deepEqual(updatedDb.getFileTags(updated.id), ['important']);
+        assert.equal(updatedDb.getShare(shareToken).file_id, updated.id);
+        updatedDb.close();
 
         for (const upload of pool.uploads) {
             const header = parseHeader(upload.data);

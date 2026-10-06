@@ -38,6 +38,27 @@ export async function getPassword(passwordOption, allowCache = true) {
     return password;
 }
 
+/** Read a password from a small owner-only file for services and cron jobs. */
+export function readPrivatePasswordFile(filePath) {
+    const resolved = path.resolve(filePath);
+    let stats;
+    try {
+        stats = fs.statSync(resolved);
+    } catch (error) {
+        throw new Error(`Cannot read password file: ${error.message}`);
+    }
+    if (!stats.isFile()) throw new Error('Password file must be a regular file');
+    if (stats.size > 16 * 1024) throw new Error('Password file is unexpectedly large');
+    if (process.platform !== 'win32' && (stats.mode & 0o077) !== 0) {
+        throw new Error('Password file permissions are too open; run chmod 600 on it');
+    }
+
+    const password = fs.readFileSync(resolved, 'utf8').replace(/\r?\n$/, '');
+    if (!password) throw new Error('Password file is empty');
+    if (/[\r\n]/.test(password)) throw new Error('Password file must contain exactly one line');
+    return password;
+}
+
 /**
  * Verify password against config (supports both legacy and new hash formats)
  * @param {string} password - Password to verify

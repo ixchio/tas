@@ -11,6 +11,7 @@ import { hashFile } from '../crypto/encryption.js';
 import { processFile } from '../index.js';
 import { TelegramPool } from '../telegram/pool.js';
 import { backupRemoteManifest } from '../manifest.js';
+import { pruneOrphanedStaging, resumePendingUploads } from '../uploads/resume.js';
 
 // Debounce time in ms to batch rapid file changes
 const DEBOUNCE_MS = 1000;
@@ -36,6 +37,7 @@ export class SyncEngine extends EventEmitter {
         this.password = options.password;
         this.config = options.config;
         this.limitRate = options.limitRate || null;
+        this.autoResume = options.autoResume !== false;
         this.watchers = new Map(); // path -> FSWatcher
         this.pendingChanges = new Map(); // path -> timeout
         this.db = null;
@@ -58,6 +60,14 @@ export class SyncEngine extends EventEmitter {
      */
     shouldIgnore(filename) {
         return IGNORE_PATTERNS.some(pattern => pattern.test(filename));
+    }
+
+    /** A matching durable record can rebuild missing local sync state. */
+    hasStoredVersion(logicalPath, hash) {
+        const stored = this.db.findByExactName(logicalPath);
+        if (!stored || stored.hash !== hash) return false;
+        const chunks = this.db.getChunks(stored.id);
+        return chunks.length === stored.chunks && chunks.every((chunk, index) => chunk.chunk_index === index);
     }
 
     /**
@@ -130,6 +140,14 @@ export class SyncEngine extends EventEmitter {
 
                 if (existing && existing.file_hash === hash) {
                     // File unchanged, just update mtime
+                    this.db.updateSyncState(folder.id, file.relativePath, hash, file.mtime);
+                    skipped++;
+                    continue;
+                }
+
+                if (this.hasStoredVersion(file.relativePath, hash)) {
+                    // This commonly happens after an interrupted sync upload is
+                    // completed by automatic resume before the initial scan.
                     this.db.updateSyncState(folder.id, file.relativePath, hash, file.mtime);
                     skipped++;
                     continue;
@@ -242,6 +260,11 @@ export class SyncEngine extends EventEmitter {
                 return; // No actual change
             }
 
+            if (this.hasStoredVersion(filename, hash)) {
+                this.db.updateSyncState(folder.id, filename, hash, stats.mtimeMs);
+                return;
+            }
+
             this.emit('file-upload-start', { file: filename });
 
             await processFile(fullPath, {
@@ -348,6 +371,28 @@ export class SyncEngine extends EventEmitter {
      */
     async start() {
         this.running = true;
+        if (this.autoResume) {
+            const pruned = pruneOrphanedStaging({ dataDir: this.dataDir, db: this.db });
+            if (pruned.removed > 0) this.emit('staging-pruned', pruned);
+
+            const resume = await resumePendingUploads({
+                dataDir: this.dataDir,
+                password: this.password,
+                config: this.config,
+                db: this.db,
+                telegramPool: this.telegramPool,
+                limitRate: this.limitRate,
+                onUploadStart: upload => this.emit('resume-upload-start', { file: upload.filename }),
+                onUploadComplete: upload => this.emit('resume-upload-complete', { file: upload.filename }),
+                onUploadError: (upload, error) => this.emit('resume-upload-error', {
+                    file: upload.filename,
+                    error: error.message
+                }),
+                onManifestError: error => this.emit('manifest-error', { error: error.message })
+            });
+            if (resume.found > 0) this.emit('resume-complete', resume);
+        }
+
         const folders = this.db.getSyncFolders();
 
         for (const folder of folders) {
