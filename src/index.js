@@ -322,7 +322,10 @@ export async function retrieveFile(fileRecord, options) {
         outputDir,
         `.${path.basename(outputPath)}.tas-part-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`
     );
-    const writeStream = fs.createWriteStream(tempOutput, { mode: 0o600 });
+    // Open synchronously and pass the descriptor to avoid a create-after-cleanup
+    // race when the readable fails before an async WriteStream open completes.
+    const tempFd = fs.openSync(tempOutput, 'wx', 0o600);
+    const writeStream = fs.createWriteStream(tempOutput, { fd: tempFd, autoClose: true });
 
     onProgress?.('Decrypting, decompressing, and writing file...');
 
