@@ -35,6 +35,7 @@ import os from 'os';
 import { HOSTED_BOT_API_DOWNLOAD_LIMIT } from './utils/chunk-readability.js';
 import { clearPendingUploads, resumePendingUploads } from './uploads/resume.js';
 import { resolveLogicalPath } from './utils/logical-path.js';
+import { acquireSyncLock, readSyncLock } from './sync/process-lock.js';
 
 const DATA_DIR = process.env.TAS_DATA_DIR || path.join(os.homedir(), '.tas');
 
@@ -1222,6 +1223,15 @@ syncCmd
 
             const folders = db.getSyncFolders();
             const pending = db.getPendingUploads();
+            const syncProcess = readSyncLock(DATA_DIR);
+
+            if (syncProcess?.running) {
+                console.log(chalk.green(`\n● Sync process running (PID ${syncProcess.pid})`));
+            } else if (syncProcess) {
+                console.log(chalk.yellow('\n○ Stale sync process lock will be recovered on next start'));
+            } else {
+                console.log(chalk.dim('\n○ Sync process not running'));
+            }
 
             if (folders.length === 0) {
                 console.log(chalk.yellow('\n📭 No folders registered for sync.'));
@@ -1298,7 +1308,9 @@ syncCmd
             console.log(chalk.dim(`   Bandwidth limit: ${options.limit}/s`));
         }
 
+        let syncLock = null;
         try {
+            syncLock = acquireSyncLock(DATA_DIR);
             const { SyncEngine } = await import('./sync/sync.js');
 
             const syncEngine = new SyncEngine({
@@ -1318,6 +1330,22 @@ syncCmd
 
             syncEngine.on('sync-complete', ({ folder, uploaded, skipped }) => {
                 console.log(chalk.green(`✓ Synced: ${uploaded} uploaded, ${skipped} unchanged`));
+            });
+
+            syncEngine.on('scan-progress', (progress) => {
+                if (progress.phase === 'discover') {
+                    console.log(chalk.dim(
+                        `  Scanning: ${progress.files} files across ${progress.directories} directories`
+                    ));
+                } else if (progress.phase === 'discovered') {
+                    console.log(chalk.dim(
+                        `  Found ${progress.files} files across ${progress.directories} directories`
+                    ));
+                } else if (progress.phase === 'check') {
+                    console.log(chalk.dim(
+                        `  Checked ${progress.checked}/${progress.total}: ${progress.file}`
+                    ));
+                }
             });
 
             syncEngine.on('file-upload-start', ({ file }) => {
@@ -1360,27 +1388,44 @@ syncCmd
                 console.log(chalk.cyan(`👁️  Watching: ${folder}`));
             });
 
+            syncEngine.on('watch-error', ({ folder, error }) => {
+                console.log(chalk.red(`  ✗ Cannot watch ${folder}: ${error}`));
+            });
+
+            // Install shutdown handlers before the initial scan. Large or slow
+            // mounted folders must remain interruptible while startup is active.
+            let stopping = false;
+            const cleanup = () => {
+                if (stopping) return;
+                stopping = true;
+                console.log(chalk.dim('\n\nStopping sync...'));
+                syncEngine.stop();
+                syncLock.release();
+                console.log(chalk.green('✓ Sync stopped'));
+                // A handled shutdown is clean. This also prevents
+                // Restart=on-failure service managers from reviving it.
+                process.exit(0);
+            };
+            const onSigint = () => cleanup();
+            const onSigterm = () => cleanup();
+
+            process.once('SIGINT', onSigint);
+            process.once('SIGTERM', onSigterm);
+
             // Start syncing
             await syncEngine.start();
 
+            if (!syncEngine.running) return;
+
             console.log(chalk.cyan('\n✨ Sync active! Watching for changes...'));
+            console.log(chalk.dim(`Process ID: ${process.pid}`));
             console.log(chalk.yellow('Press Ctrl+C to stop\n'));
-
-            // Handle graceful shutdown
-            const cleanup = () => {
-                console.log(chalk.dim('\n\nStopping sync...'));
-                syncEngine.stop();
-                console.log(chalk.green('✓ Sync stopped'));
-                process.exit(0);
-            };
-
-            process.on('SIGINT', cleanup);
-            process.on('SIGTERM', cleanup);
 
             // Keep process running
             await new Promise(() => { });
 
         } catch (err) {
+            syncLock?.release();
             console.error(chalk.red('Sync failed:'), err.message);
             process.exit(1);
         }

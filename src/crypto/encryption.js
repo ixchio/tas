@@ -265,12 +265,13 @@ export function hashData(data) {
 /**
  * Generate SHA-256 hash of a file (streaming)
  */
-export async function hashFile(filePath) {
+export async function hashFile(filePath, options = {}) {
     const { createReadStream } = await import('fs');
+    const { signal } = options;
 
     return new Promise((resolve, reject) => {
         const hash = crypto.createHash('sha256');
-        const stream = createReadStream(filePath);
+        const stream = createReadStream(filePath, signal ? { signal } : undefined);
 
         stream.on('data', (chunk) => hash.update(chunk));
         stream.on('end', () => resolve(hash.digest('hex')));

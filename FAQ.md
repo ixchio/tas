@@ -36,6 +36,10 @@ No in TAS 3.1. `tas sync start` resumes valid staged uploads before its initial 
 
 They are the durable state that makes upload recovery possible. Completed uploads remove their chunks immediately. Sync startup also prunes TAS-owned staging directories that are unreferenced by SQLite and older than 24 hours; it does not touch active, referenced, or unrelated directories.
 
+## Why does sync spend time scanning after resume?
+
+Resume restores the Telegram upload and durable index entry. TAS still verifies the current local tree before watching it so files changed during an interruption are not marked as synced incorrectly. Version 3.1.1 reports discovery and verification counts during this work and handles Ctrl+C immediately. If watcher setup exceeds the filesystem or Linux inotify limit, startup fails with a concrete error instead of silently leaving directories unwatched.
+
 ## Does multi-bot mode provide redundancy?
 
 No. Each chunk has one owning bot. TAS records that bot so reads and deletes route correctly, but all bots remain controlled by Telegram. A disabled bot stays configured for old chunks; removal is refused while chunks or the manifest depend on it.

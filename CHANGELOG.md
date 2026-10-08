@@ -2,6 +2,19 @@
 
 All notable changes to TAS (Telegram as Storage) will be documented in this file.
 
+## [3.1.1] - 2026-10-08
+
+### Fixed — sync startup regression (#6)
+- **Responsive initial scans** — folder discovery now uses asynchronous filesystem calls and file hashing accepts an abort signal, so a large or slow mounted tree no longer blocks Ctrl+C handling.
+- **Visible scan work** — startup reports discovered file and directory counts plus verification progress instead of appearing frozen after `Scanning`.
+- **Early shutdown handlers** — SIGINT and SIGTERM handlers are installed before resume and the initial scan, and handled shutdowns exit cleanly so `Restart=on-failure` services do not revive them.
+- **Single traversal startup** — watcher installation reuses directories collected by the initial scan instead of recursively walking the same tree a second time.
+- **Honest watcher failures** — partial `fs.watch` setup now fails startup with the failed directory count and Linux inotify guidance instead of claiming sync is active.
+- **Single sync owner** — an owner-only process lock prevents a service or old shell process from running beside another sync engine; `tas sync status` reports the active PID and dead locks recover automatically.
+
+### Tests
+- **130 passing tests** include active-scan cancellation, large-folder progress, watcher setup failure, and single-process ownership coverage.
+
 ## [3.1.0] - 2026-10-06
 
 ### Added — automatic sync recovery (#6)

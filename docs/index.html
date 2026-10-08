@@ -33,7 +33,7 @@
   <!-- HERO -->
   <section class="hero">
     <div class="w">
-      <p class="hero-sub">Open source · MIT · v3.1.0 · experimental</p>
+      <p class="hero-sub">Open source · MIT · v3.1.1 · experimental</p>
       <h1>Your files encrypted.<br>Transported through Telegram.<br>Indexed locally.</h1>
       <p class="hero-lead">TAS is an experimental local-first CLI with AES-256-GCM content encryption, resumable 19 MiB chunks, encrypted index recovery, native FUSE mount, sync, and multi-bot routing. It is not an unlimited-storage or durability service.</p>
       <div class="hero-actions">
@@ -107,7 +107,7 @@
         </div>
         <div class="feat-item">
           <h3>Folder sync</h3>
-          <p>Register a directory with <code>tas sync add</code> and TAS watches for changes. On startup it resumes valid staged uploads before scanning, then uploads new and modified files with debouncing.</p>
+          <p>Register a directory with <code>tas sync add</code> and TAS watches for changes. On startup it resumes valid staged uploads, reports scan and verification progress, then uploads new and modified files with debouncing. Startup remains interruptible with Ctrl+C.</p>
         </div>
         <div class="feat-item">
           <h3>Expiring share links</h3>

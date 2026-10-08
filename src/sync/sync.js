@@ -15,6 +15,22 @@ import { pruneOrphanedStaging, resumePendingUploads } from '../uploads/resume.js
 
 // Debounce time in ms to batch rapid file changes
 const DEBOUNCE_MS = 1000;
+const PROGRESS_INTERVAL_MS = 2000;
+const PROGRESS_FILE_INTERVAL = 250;
+
+function abortError() {
+    const error = new Error('Sync stopped');
+    error.name = 'AbortError';
+    return error;
+}
+
+function throwIfAborted(signal) {
+    if (signal?.aborted) throw abortError();
+}
+
+function isAbortError(error) {
+    return error?.name === 'AbortError' || error?.code === 'ABORT_ERR';
+}
 
 // Ignore patterns.
 // NOTE: dotfiles are intentionally NOT ignored — TAS is advertised as a
@@ -43,6 +59,9 @@ export class SyncEngine extends EventEmitter {
         this.db = null;
         this.telegramPool = null;
         this.running = false;
+        this.starting = false;
+        this.closeWhenIdle = false;
+        this.abortController = null;
     }
 
     /**
@@ -73,27 +92,61 @@ export class SyncEngine extends EventEmitter {
     /**
      * Get all files in a directory recursively
      */
-    async scanDirectory(dirPath, relativeTo = dirPath) {
+    async scanDirectory(dirPath, relativeTo = dirPath, scanState = null) {
+        const state = scanState || {
+            signal: this.abortController?.signal,
+            files: 0,
+            directories: 0,
+            directoryPaths: [],
+            lastReportAt: Date.now(),
+            lastReportFiles: 0
+        };
         const files = [];
-        const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+        throwIfAborted(state.signal);
+        const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+        state.directories++;
+        state.directoryPaths?.push(dirPath);
 
         for (const entry of entries) {
+            throwIfAborted(state.signal);
             if (this.shouldIgnore(entry.name)) continue;
 
             const fullPath = path.join(dirPath, entry.name);
             const relativePath = path.relative(relativeTo, fullPath);
 
             if (entry.isDirectory()) {
-                const subFiles = await this.scanDirectory(fullPath, relativeTo);
+                const subFiles = await this.scanDirectory(fullPath, relativeTo, state);
                 files.push(...subFiles);
             } else if (entry.isFile()) {
-                const stats = fs.statSync(fullPath);
+                let stats;
+                try {
+                    stats = await fs.promises.stat(fullPath);
+                } catch (error) {
+                    // Files may disappear while a live folder is being scanned.
+                    if (error.code === 'ENOENT') continue;
+                    throw error;
+                }
                 files.push({
                     path: fullPath,
                     relativePath,
                     mtime: stats.mtimeMs,
                     size: stats.size
                 });
+                state.files++;
+
+                const now = Date.now();
+                if (
+                    state.files - state.lastReportFiles >= PROGRESS_FILE_INTERVAL ||
+                    now - state.lastReportAt >= PROGRESS_INTERVAL_MS
+                ) {
+                    state.lastReportAt = now;
+                    state.lastReportFiles = state.files;
+                    this.emit('scan-progress', {
+                        phase: 'discover',
+                        files: state.files,
+                        directories: state.directories
+                    });
+                }
             }
         }
 
@@ -111,13 +164,50 @@ export class SyncEngine extends EventEmitter {
 
         this.emit('sync-start', { folder: folderPath });
 
-        const files = await this.scanDirectory(folderPath);
+        const signal = this.abortController?.signal;
+        const scanState = {
+            signal,
+            files: 0,
+            directories: 0,
+            directoryPaths: [],
+            lastReportAt: Date.now(),
+            lastReportFiles: 0
+        };
+        const files = await this.scanDirectory(folderPath, folderPath, scanState);
+        throwIfAborted(signal);
+        this.emit('scan-progress', {
+            phase: 'discovered',
+            files: files.length,
+            directories: scanState.directories
+        });
         const existingStates = this.db.getFolderSyncStates(folder.id);
         const stateMap = new Map(existingStates.map(s => [s.relative_path, s]));
 
         let uploaded = 0;
         let skipped = 0;
+        let checked = 0;
+        let lastCheckReportAt = Date.now();
+        let lastCheckReportCount = 0;
         const supersededChunks = [];
+
+        const reportChecked = (file) => {
+            checked++;
+            const now = Date.now();
+            if (
+                checked === files.length ||
+                checked - lastCheckReportCount >= PROGRESS_FILE_INTERVAL ||
+                now - lastCheckReportAt >= PROGRESS_INTERVAL_MS
+            ) {
+                lastCheckReportAt = now;
+                lastCheckReportCount = checked;
+                this.emit('scan-progress', {
+                    phase: 'check',
+                    checked,
+                    total: files.length,
+                    file: file.relativePath
+                });
+            }
+        };
 
         // Process files with concurrency limit
         const CONCURRENCY = 4;
@@ -126,60 +216,78 @@ export class SyncEngine extends EventEmitter {
 
         const worker = async () => {
             while (queue.length > 0) {
+                throwIfAborted(signal);
                 const file = queue.shift();
-                const existing = stateMap.get(file.relativePath);
-
-                // Check if file has changed (by mtime)
-                if (existing && existing.mtime >= file.mtime) {
-                    skipped++;
-                    continue;
-                }
-
-                // Calculate hash to detect actual changes
-                const hash = await hashFile(file.path);
-
-                if (existing && existing.file_hash === hash) {
-                    // File unchanged, just update mtime
-                    this.db.updateSyncState(folder.id, file.relativePath, hash, file.mtime);
-                    skipped++;
-                    continue;
-                }
-
-                if (this.hasStoredVersion(file.relativePath, hash)) {
-                    // This commonly happens after an interrupted sync upload is
-                    // completed by automatic resume before the initial scan.
-                    this.db.updateSyncState(folder.id, file.relativePath, hash, file.mtime);
-                    skipped++;
-                    continue;
-                }
-
-                // File is new or changed - upload it
                 try {
-                    this.emit('file-upload-start', { file: file.relativePath });
+                    const existing = stateMap.get(file.relativePath);
 
-                    const result = await processFile(file.path, {
-                        password: this.password,
-                        dataDir: this.dataDir,
-                        customName: file.relativePath, // Use relative path as name
-                        config: this.config,
-                        telegramPool: this.telegramPool,
-                        updateManifest: false,
-                        replaceExisting: true,
-                        limitRate: this.limitRate ? Math.floor(this.limitRate / CONCURRENCY) : null,
-                        onProgress: (msg) => this.emit('progress', { file: file.relativePath, message: msg })
-                    });
-                    supersededChunks.push(...(result.supersededChunks || []));
+                    // Check if file has changed (by mtime)
+                    if (existing && existing.mtime >= file.mtime) {
+                        skipped++;
+                        continue;
+                    }
 
-                    // Update sync state
-                    this.db.updateSyncState(folder.id, file.relativePath, hash, file.mtime);
-                    uploaded++;
+                    // Calculate hash to detect actual changes. The abort signal
+                    // keeps Ctrl+C responsive even while reading a large file.
+                    let hash;
+                    try {
+                        hash = await hashFile(file.path, { signal });
+                    } catch (error) {
+                        if (isAbortError(error)) throw error;
+                        if (error.code === 'ENOENT') {
+                            skipped++;
+                            continue;
+                        }
+                        throw error;
+                    }
 
-                    this.emit('file-upload-complete', { file: file.relativePath });
-                } catch (err) {
-                    // Sleep briefly on a network/provider error before this
-                    // worker advances; the staged upload remains resumable.
-                    await new Promise(r => setTimeout(r, 2000));
-                    this.emit('file-upload-error', { file: file.relativePath, error: err.message });
+                    if (existing && existing.file_hash === hash) {
+                        // File unchanged, just update mtime
+                        this.db.updateSyncState(folder.id, file.relativePath, hash, file.mtime);
+                        skipped++;
+                        continue;
+                    }
+
+                    if (this.hasStoredVersion(file.relativePath, hash)) {
+                        // This commonly happens after an interrupted sync upload is
+                        // completed by automatic resume before the initial scan.
+                        this.db.updateSyncState(folder.id, file.relativePath, hash, file.mtime);
+                        skipped++;
+                        continue;
+                    }
+
+                    // File is new or changed - upload it
+                    try {
+                        this.emit('file-upload-start', { file: file.relativePath });
+
+                        const result = await processFile(file.path, {
+                            password: this.password,
+                            dataDir: this.dataDir,
+                            customName: file.relativePath, // Use relative path as name
+                            config: this.config,
+                            telegramPool: this.telegramPool,
+                            updateManifest: false,
+                            replaceExisting: true,
+                            signal,
+                            limitRate: this.limitRate ? Math.floor(this.limitRate / CONCURRENCY) : null,
+                            onProgress: (msg) => this.emit('progress', { file: file.relativePath, message: msg })
+                        });
+                        supersededChunks.push(...(result.supersededChunks || []));
+
+                        // Update sync state
+                        this.db.updateSyncState(folder.id, file.relativePath, hash, file.mtime);
+                        uploaded++;
+
+                        this.emit('file-upload-complete', { file: file.relativePath });
+                    } catch (err) {
+                        if (isAbortError(err) || signal?.aborted) throw abortError();
+                        // Sleep briefly on a network/provider error before this
+                        // worker advances; the staged upload remains resumable.
+                        await new Promise(r => setTimeout(r, 2000));
+                        this.emit('file-upload-error', { file: file.relativePath, error: err.message });
+                    }
+                } finally {
+                    reportChecked(file);
                 }
             }
         };
@@ -189,6 +297,7 @@ export class SyncEngine extends EventEmitter {
         }
 
         await Promise.all(promises);
+        throwIfAborted(signal);
 
         if (uploaded > 0) {
             try {
@@ -208,7 +317,7 @@ export class SyncEngine extends EventEmitter {
 
         this.emit('sync-complete', { folder: folderPath, uploaded, skipped });
 
-        return { uploaded, skipped };
+        return { uploaded, skipped, directories: scanState.directoryPaths };
     }
 
     /**
@@ -307,7 +416,7 @@ export class SyncEngine extends EventEmitter {
     }
 
     _watchSingleDir(watchedDir, rootPath) {
-        if (this.watchers.has(watchedDir)) return;
+        if (this.watchers.has(watchedDir)) return true;
         let watcher;
         try {
             watcher = fs.watch(watchedDir, (event, filename) => {
@@ -330,7 +439,7 @@ export class SyncEngine extends EventEmitter {
             });
         } catch (err) {
             this.emit('watch-error', { folder: watchedDir, error: err.message });
-            return;
+            return false;
         }
 
         watcher.on('error', (err) => {
@@ -338,15 +447,29 @@ export class SyncEngine extends EventEmitter {
         });
 
         this.watchers.set(watchedDir, watcher);
+        return true;
     }
 
     /**
      * Start watching a folder (recursive on all platforms)
      */
-    watchFolder(folderPath) {
+    async watchFolder(folderPath, directories = null) {
         if (!fs.existsSync(folderPath)) return;
-        for (const dir of this._collectDirs(folderPath)) {
-            this._watchSingleDir(dir, folderPath);
+        const dirs = directories || this._collectDirs(folderPath);
+        let failed = 0;
+        for (let index = 0; index < dirs.length; index++) {
+            throwIfAborted(this.abortController?.signal);
+            if (!this._watchSingleDir(dirs[index], folderPath)) failed++;
+            // Yield while installing a large watcher set so signals are handled.
+            if ((index + 1) % PROGRESS_FILE_INTERVAL === 0) {
+                await new Promise(resolve => setImmediate(resolve));
+            }
+        }
+        if (failed > 0) {
+            throw new Error(
+                `Could not watch ${failed}/${dirs.length} directories under ${folderPath}; ` +
+                'check filesystem support and the Linux inotify watch limit'
+            );
         }
         this.emit('watch-start', { folder: folderPath });
     }
@@ -370,38 +493,59 @@ export class SyncEngine extends EventEmitter {
      * Start syncing all registered folders
      */
     async start() {
+        if (this.running || this.starting) throw new Error('Sync is already running');
         this.running = true;
-        if (this.autoResume) {
-            const pruned = pruneOrphanedStaging({ dataDir: this.dataDir, db: this.db });
-            if (pruned.removed > 0) this.emit('staging-pruned', pruned);
+        this.starting = true;
+        this.closeWhenIdle = false;
+        this.abortController = new AbortController();
+        try {
+            if (this.autoResume) {
+                const pruned = pruneOrphanedStaging({ dataDir: this.dataDir, db: this.db });
+                if (pruned.removed > 0) this.emit('staging-pruned', pruned);
 
-            const resume = await resumePendingUploads({
-                dataDir: this.dataDir,
-                password: this.password,
-                config: this.config,
-                db: this.db,
-                telegramPool: this.telegramPool,
-                limitRate: this.limitRate,
-                onUploadStart: upload => this.emit('resume-upload-start', { file: upload.filename }),
-                onUploadComplete: upload => this.emit('resume-upload-complete', { file: upload.filename }),
-                onUploadError: (upload, error) => this.emit('resume-upload-error', {
-                    file: upload.filename,
-                    error: error.message
-                }),
-                onManifestError: error => this.emit('manifest-error', { error: error.message })
-            });
-            if (resume.found > 0) this.emit('resume-complete', resume);
-        }
-
-        const folders = this.db.getSyncFolders();
-
-        for (const folder of folders) {
-            if (folder.enabled) {
-                // Initial sync
-                await this.syncFolder(folder.local_path);
-                // Start watching
-                this.watchFolder(folder.local_path);
+                const resume = await resumePendingUploads({
+                    dataDir: this.dataDir,
+                    password: this.password,
+                    config: this.config,
+                    db: this.db,
+                    telegramPool: this.telegramPool,
+                    limitRate: this.limitRate,
+                    onUploadStart: upload => this.emit('resume-upload-start', { file: upload.filename }),
+                    onUploadComplete: upload => this.emit('resume-upload-complete', { file: upload.filename }),
+                    onUploadError: (upload, error) => this.emit('resume-upload-error', {
+                        file: upload.filename,
+                        error: error.message
+                    }),
+                    onManifestError: error => this.emit('manifest-error', { error: error.message })
+                });
+                if (resume.found > 0) this.emit('resume-complete', resume);
             }
+
+            throwIfAborted(this.abortController.signal);
+            const folders = this.db.getSyncFolders();
+
+            for (const folder of folders) {
+                throwIfAborted(this.abortController.signal);
+                if (folder.enabled) {
+                    // Initial sync
+                    const result = await this.syncFolder(folder.local_path);
+                    throwIfAborted(this.abortController.signal);
+                    // Start watching
+                    await this.watchFolder(folder.local_path, result.directories);
+                }
+            }
+        } catch (error) {
+            if (!isAbortError(error)) throw error;
+        } finally {
+            this.starting = false;
+            if (this.closeWhenIdle) this.closeDatabase();
+        }
+    }
+
+    closeDatabase() {
+        if (this.db) {
+            this.db.close();
+            this.db = null;
         }
     }
 
@@ -410,6 +554,7 @@ export class SyncEngine extends EventEmitter {
      */
     stop() {
         this.running = false;
+        this.abortController?.abort();
 
         // Clear pending changes
         for (const timeout of this.pendingChanges.values()) {
@@ -424,9 +569,7 @@ export class SyncEngine extends EventEmitter {
         }
         this.watchers.clear();
 
-        if (this.db) {
-            this.db.close();
-            this.db = null;
-        }
+        if (this.starting) this.closeWhenIdle = true;
+        else this.closeDatabase();
     }
 }

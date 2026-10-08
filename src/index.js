@@ -41,7 +41,8 @@ export async function processFile(filePath, options) {
         limitRate,
         telegramPool,
         replaceExisting = false,
-        updateManifest = true
+        updateManifest = true,
+        signal
     } = options;
 
     onProgress?.('Reading file...');
@@ -53,7 +54,7 @@ export async function processFile(filePath, options) {
 
     // Calculate hash
     onProgress?.('Calculating hash...');
-    const hash = await hashFile(filePath);
+    const hash = await hashFile(filePath, { signal });
 
     // Logical paths are exact. Identical bytes may legitimately exist under
     // different paths, so content hash is indexed but no longer globally unique.
@@ -132,7 +133,13 @@ export async function processFile(filePath, options) {
 
     onProgress?.('Compressing and encrypting to resumable chunks...');
     try {
-        await pipeline(fs.createReadStream(filePath), compressStream, encryptStream, chunkingStream);
+        await pipeline(
+            fs.createReadStream(filePath),
+            compressStream,
+            encryptStream,
+            chunkingStream,
+            ...(signal ? [{ signal }] : [])
+        );
     } catch (error) {
         try { fs.rmSync(uploadDir, { recursive: true, force: true }); } catch { }
         db.close();
@@ -183,6 +190,11 @@ export async function processFile(filePath, options) {
             await client.initialize({ includeDisabled: false });
         }
         for (const staged of stagedChunks) {
+            if (signal?.aborted) {
+                const abortError = new Error('Sync stopped');
+                abortError.name = 'AbortError';
+                throw abortError;
+            }
             onProgress?.(`Uploading chunk ${staged.index + 1}/${totalChunks}...`);
             const botId = client.selectBotId(hash, staged.index);
             const result = await client.sendFile(

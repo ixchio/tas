@@ -5,8 +5,10 @@
 import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { FileIndex } from '../src/db/index.js';
+import { SyncEngine } from '../src/sync/sync.js';
 
 const TEST_DB_PATH = '/tmp/tas-test-sync.db';
 
@@ -136,5 +138,80 @@ describe('Sync State', () => {
         const newFolderId = db.addSyncFolder('/home/user/documents');
         const states = db.getFolderSyncStates(newFolderId);
         assert.strictEqual(states.length, 0);
+    });
+});
+
+describe('Sync startup lifecycle', () => {
+    test('reports discovery progress for large folders', async () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tas-sync-scan-'));
+        try {
+            for (let index = 0; index < 300; index++) {
+                fs.writeFileSync(path.join(root, `file-${index}.txt`), 'x');
+            }
+
+            const engine = new SyncEngine({ dataDir: root, password: 'test', config: { bots: [] } });
+            const progress = [];
+            engine.on('scan-progress', event => progress.push(event));
+
+            const files = await engine.scanDirectory(root);
+
+            assert.strictEqual(files.length, 300);
+            assert.ok(progress.some(event => event.phase === 'discover' && event.files >= 250));
+        } finally {
+            fs.rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test('stop interrupts an active initial scan and closes the database when idle', async () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tas-sync-stop-'));
+        const dataDir = path.join(root, 'data');
+        const watched = path.join(root, 'watched');
+        fs.mkdirSync(dataDir);
+        fs.mkdirSync(watched);
+        try {
+            for (let index = 0; index < 1000; index++) {
+                fs.writeFileSync(path.join(watched, `file-${index}.txt`), 'x');
+            }
+
+            const db = new FileIndex(path.join(dataDir, 'index.db'));
+            db.init();
+            db.addSyncFolder(watched);
+
+            const engine = new SyncEngine({
+                dataDir,
+                password: 'test',
+                config: { bots: [] },
+                autoResume: false
+            });
+            engine.db = db;
+            engine.telegramPool = {};
+
+            const start = engine.start();
+            setTimeout(() => engine.stop(), 0);
+            await start;
+
+            assert.strictEqual(engine.running, false);
+            assert.strictEqual(engine.starting, false);
+            assert.strictEqual(engine.db, null);
+            assert.strictEqual(engine.watchers.size, 0);
+        } finally {
+            fs.rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test('fails startup when any directory could not be watched', async () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tas-sync-watch-'));
+        try {
+            const engine = new SyncEngine({ dataDir: root, password: 'test', config: { bots: [] } });
+            engine.abortController = new AbortController();
+            engine._watchSingleDir = () => false;
+
+            await assert.rejects(
+                engine.watchFolder(root, [root, path.join(root, 'nested')]),
+                /Could not watch 2\/2 directories/
+            );
+        } finally {
+            fs.rmSync(root, { recursive: true, force: true });
+        }
     });
 });

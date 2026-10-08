@@ -30,7 +30,7 @@ tas sync add ~/Documents
 tas sync start
 ```
 
-Sync startup resumes recoverable staged uploads before scanning the folder. It also removes TAS staging directories only when they are unreferenced and at least 24 hours old. Use `--no-resume` to defer recovery.
+Sync startup resumes recoverable staged uploads before scanning the folder. It reports discovery and verification progress for large trees, and Ctrl+C stops it during startup or watch mode. It also removes TAS staging directories only when they are unreferenced and at least 24 hours old. Use `--no-resume` to defer recovery.
 
 For systemd or another headless service, keep the password out of the command line:
 

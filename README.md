@@ -137,7 +137,7 @@ tas sync pull                   # Pull all synced files back down
 tas sync status                 # See what's queued / synced / pending
 ```
 
-`sync start` resumes staged uploads before its initial scan, so a restart does not create another copy of the same upload. Use `--no-resume` to defer recovery. For a service account, `--password-file ~/.config/tas/password` reads a one-line file that must be mode `600` on POSIX systems.
+`sync start` resumes staged uploads before its initial scan, so a restart does not create another copy of the same upload. Discovery and verification counts remain visible on large or slow mounted folders, and Ctrl+C works during startup as well as watch mode. An owner-only process lock prevents two sync engines from running against the same TAS data directory; `tas sync status` reports the active PID. TAS also refuses to claim an active watcher when the filesystem or Linux inotify limit rejected any directory. Use `--no-resume` to defer recovery. For a service account, `--password-file ~/.config/tas/password` reads a one-line file that must be mode `600` on POSIX systems.
 
 ---
 
@@ -510,7 +510,7 @@ Use TAS only at your own risk, do not use multiple bots to evade limits, follow 
 git clone https://github.com/ixchio/tas
 cd tas && npm install
 
-npm test               # Run all 125 tests (crypto, paths, recovery, downloads, FUSE, sync, shares)
+npm test               # Run all 130 tests (crypto, paths, recovery, downloads, FUSE, sync, shares)
 npm test -- --watch    # Watch mode for active development
 ```
 
