@@ -18,7 +18,7 @@
   <a href="https://github.com/ixchio/tas/network/members"><img src="https://img.shields.io/github/forks/ixchio/tas?style=social" alt="GitHub Forks"></a>
   <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen?logo=node.js" alt="Node.js >= 18">
   <img src="https://img.shields.io/badge/encryption-AES--256--GCM-blueviolet?logo=shield" alt="AES-256-GCM">
-  <img src="https://img.shields.io/badge/tests-113%20passing-success" alt="113 Tests Passing">
+  <img src="https://img.shields.io/badge/tests-130%20passing-success" alt="130 Tests Passing">
 </p>
 
 <p align="center">
@@ -34,7 +34,7 @@
 
 ---
 
-> **TAS 3.0** — One `npm install`, one `tas init`, then `tas push yourfile.pdf`. TAS encrypts content locally and sends round-trip-safe chunks through the Bot API. It is experimental transport, not a durable backup service: Telegram can limit, remove, or terminate access. Keep an independent backup.
+> **TAS 3.1** — One `npm install`, one `tas init`, then `tas push yourfile.pdf`. TAS encrypts content locally and sends round-trip-safe chunks through the Bot API. It is experimental transport, not a durable backup service: Telegram can limit, remove, or terminate access. Keep an independent backup.
 
 ---
 
